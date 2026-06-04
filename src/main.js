@@ -808,8 +808,8 @@ if (!gotSingleInstanceLock) {
     autoUpdater.on('error', (err) => {
       writeDesktopLog('updater error', { message: err?.message });
     });
-    autoUpdater.checkForUpdates().catch(() => {});
-    setInterval(() => { autoUpdater.checkForUpdates().catch(() => {}); }, 60 * 60 * 1000);
+    setTimeout(() => { autoUpdater.checkForUpdates().catch(() => {}); }, 10000);
+    setInterval(() => { autoUpdater.checkForUpdates().catch(() => {}); }, 5 * 60 * 1000);
 
     writeDesktopLog('main window and tray created');
   }).catch((error) => {
