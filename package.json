@@ -1,6 +1,6 @@
 {
   "name": "elvador-desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Elvador Windows desktop shell and native notification engine",
   "author": "Elvador",
@@ -9,6 +9,9 @@
     "dev": "electron .",
     "pack": "electron-builder --dir",
     "build:win": "electron-builder --win nsis portable"
+  },
+  "dependencies": {
+    "electron-updater": "^6.6.2"
   },
   "devDependencies": {
     "electron": "42.3.3",
@@ -31,12 +34,16 @@
         "to": "icon-512.png"
       }
     ],
+    "publish": {
+      "provider": "github",
+      "owner": "talhaturkman",
+      "repo": "elvador-desktop"
+    },
     "win": {
       "icon": "assets/icon-512.png",
       "signAndEditExecutable": false,
       "target": [
-        "nsis",
-        "portable"
+        "nsis"
       ]
     },
     "nsis": {
@@ -47,9 +54,6 @@
       "createStartMenuShortcut": true,
       "shortcutName": "Elvador",
       "runAfterFinish": true
-    },
-    "portable": {
-      "artifactName": "${productName}-Portable-${version}-${arch}.${ext}"
     }
   }
 }

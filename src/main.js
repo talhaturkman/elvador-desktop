@@ -30,6 +30,7 @@ const {
   nativeImage,
   shell
 } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const { getDesktopConfig } = require('./config');
 const { createNativeNotificationService } = require('./nativeNotifications');
 const { createDesktopPendingPoller } = require('./desktopPendingPoller');
@@ -776,6 +777,21 @@ if (!gotSingleInstanceLock) {
         });
       }, 1200);
     }
+    autoUpdater.logger = { info: (m) => writeDesktopLog('updater:info', m), warn: (m) => writeDesktopLog('updater:warn', m), error: (m) => writeDesktopLog('updater:error', m) };
+    autoUpdater.autoDownload = true;
+    autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.on('update-available', (info) => {
+      writeDesktopLog('update available', { version: info?.version });
+    });
+    autoUpdater.on('update-downloaded', (info) => {
+      writeDesktopLog('update downloaded, will install on quit', { version: info?.version });
+    });
+    autoUpdater.on('error', (err) => {
+      writeDesktopLog('updater error', { message: err?.message });
+    });
+    autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+    setInterval(() => { autoUpdater.checkForUpdatesAndNotify().catch(() => {}); }, 60 * 60 * 1000);
+
     writeDesktopLog('main window and tray created');
   }).catch((error) => {
     writeDesktopLog('app ready failed', {
