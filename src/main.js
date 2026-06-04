@@ -764,7 +764,21 @@ if (!gotSingleInstanceLock) {
       writeDesktopLog('update available', { version: info?.version });
     });
     autoUpdater.on('update-downloaded', (info) => {
-      writeDesktopLog('update downloaded, will install on quit', { version: info?.version });
+      writeDesktopLog('update downloaded', { version: info?.version });
+      const { dialog } = require('electron');
+      dialog.showMessageBox(mainWindow, {
+        type: 'info',
+        title: 'Güncelleme Hazır',
+        message: `Elvador v${info?.version} indirildi.`,
+        detail: 'Güncellemeyi yüklemek için uygulama yeniden başlatılacak.',
+        buttons: ['Şimdi Yeniden Başlat', 'Sonra'],
+        defaultId: 0
+      }).then((result) => {
+        if (result.response === 0) {
+          isQuitting = true;
+          autoUpdater.quitAndInstall();
+        }
+      });
     });
     autoUpdater.on('error', (err) => {
       writeDesktopLog('updater error', { message: err?.message });
