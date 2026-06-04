@@ -473,6 +473,24 @@ function createMainWindow(initialUrl = getStartupUrl()) {
 
   mainWindow.setMenuBarVisibility(false);
 
+  mainWindow.webContents.on('context-menu', (_event, params) => {
+    const contextMenu = Menu.buildFromTemplate([
+      {
+        label: 'QR/Link Sıfırla',
+        click: () => {
+          clearAdminAccessUrl();
+          pendingPoller?.stop();
+          loadDesktopOnboardingPage();
+        }
+      },
+      { type: 'separator' },
+      { label: 'Geri', click: () => mainWindow.webContents.goBack(), enabled: mainWindow.webContents.canGoBack() },
+      { label: 'İleri', click: () => mainWindow.webContents.goForward(), enabled: mainWindow.webContents.canGoForward() },
+      { label: 'Yenile', click: () => mainWindow.webContents.reload() }
+    ]);
+    contextMenu.popup();
+  });
+
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (shouldOpenInsideApp(url)) {
       openInApp(url);
