@@ -483,6 +483,12 @@ function createMainWindow(initialUrl = getStartupUrl()) {
           loadDesktopOnboardingPage();
         }
       },
+      {
+        label: 'Güncelleme Kontrol Et',
+        click: () => {
+          autoUpdater.checkForUpdates().catch(() => {});
+        }
+      },
       { type: 'separator' },
       { label: 'Geri', click: () => mainWindow.webContents.goBack(), enabled: mainWindow.webContents.canGoBack() },
       { label: 'İleri', click: () => mainWindow.webContents.goForward(), enabled: mainWindow.webContents.canGoForward() },
@@ -784,25 +790,26 @@ if (!gotSingleInstanceLock) {
     autoUpdater.on('update-downloaded', (info) => {
       writeDesktopLog('update downloaded', { version: info?.version });
       const { dialog } = require('electron');
-      dialog.showMessageBox(mainWindow, {
+      dialog.showMessageBox(mainWindow || null, {
         type: 'info',
         title: 'Güncelleme Hazır',
         message: `Elvador v${info?.version} indirildi.`,
         detail: 'Güncellemeyi yüklemek için uygulama yeniden başlatılacak.',
         buttons: ['Şimdi Yeniden Başlat', 'Sonra'],
-        defaultId: 0
+        defaultId: 0,
+        noLink: true
       }).then((result) => {
         if (result.response === 0) {
           isQuitting = true;
-          autoUpdater.quitAndInstall();
+          setImmediate(() => autoUpdater.quitAndInstall(false, true));
         }
       });
     });
     autoUpdater.on('error', (err) => {
       writeDesktopLog('updater error', { message: err?.message });
     });
-    autoUpdater.checkForUpdatesAndNotify().catch(() => {});
-    setInterval(() => { autoUpdater.checkForUpdatesAndNotify().catch(() => {}); }, 60 * 60 * 1000);
+    autoUpdater.checkForUpdates().catch(() => {});
+    setInterval(() => { autoUpdater.checkForUpdates().catch(() => {}); }, 60 * 60 * 1000);
 
     writeDesktopLog('main window and tray created');
   }).catch((error) => {
