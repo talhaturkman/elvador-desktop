@@ -432,6 +432,13 @@ function createNativeNotificationService({
       closeRecord(existing);
     }
 
+    for (const [activeId, activeRecord] of activeNotifications.entries()) {
+      if (activeRecord.payload.category === normalized.category) {
+        activeNotifications.delete(activeId);
+        closeRecord(activeRecord);
+      }
+    }
+
     const record = {
       payload: normalized,
       overlayWindow: null,
