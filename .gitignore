@@ -1,0 +1,12 @@
+node_modules/
+dist/
+out/
+release/
+.vite/
+.cache/
+*.exe
+*.msi
+*.zip
+*.blockmap
+*.log
+

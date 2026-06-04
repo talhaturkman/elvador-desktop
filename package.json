@@ -1,0 +1,55 @@
+{
+  "name": "elvador-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Elvador Windows desktop shell and native notification engine",
+  "author": "Elvador",
+  "main": "src/main.js",
+  "scripts": {
+    "dev": "electron .",
+    "pack": "electron-builder --dir",
+    "build:win": "electron-builder --win nsis portable"
+  },
+  "devDependencies": {
+    "electron": "42.3.3",
+    "electron-builder": "26.8.1"
+  },
+  "build": {
+    "appId": "com.elvador.desktop",
+    "productName": "Elvador",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "assets/icon-512.png",
+        "to": "icon-512.png"
+      }
+    ],
+    "win": {
+      "icon": "assets/icon-512.png",
+      "signAndEditExecutable": false,
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}",
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Elvador",
+      "runAfterFinish": true
+    },
+    "portable": {
+      "artifactName": "${productName}-Portable-${version}-${arch}.${ext}"
+    }
+  }
+}
