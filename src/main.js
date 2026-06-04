@@ -462,6 +462,7 @@ function createMainWindow(initialUrl = getStartupUrl()) {
     title: 'Elvador',
     icon: iconPath,
     backgroundColor: '#111111',
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -469,6 +470,8 @@ function createMainWindow(initialUrl = getStartupUrl()) {
       sandbox: false
     }
   });
+
+  mainWindow.setMenuBarVisibility(false);
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (shouldOpenInsideApp(url)) {
@@ -586,31 +589,13 @@ function refreshTrayMenu() {
       label: pollerStatusLabel,
       enabled: false
     },
-    {
-      label: accessStatusLabel,
-      enabled: false
-    },
     { type: 'separator' },
     {
-      label: 'Open Elvador',
+      label: 'Elvador Aç',
       click: () => openInApp(getStartupUrl())
     },
     {
-      label: 'Reload Panel',
-      click: () => openInApp(lastLoadedUrl === DESKTOP_ONBOARDING_URL
-        ? getStartupUrl()
-        : (lastLoadedUrl || getStartupUrl()))
-    },
-    {
-      label: 'Change Admin Access Link',
-      click: () => {
-        focusMainWindow();
-        loadDesktopOnboardingPage();
-      }
-    },
-    {
-      label: 'Clear Saved Admin Access',
-      enabled: Boolean(savedAdminAccessUrl),
+      label: 'QR/Link Sıfırla',
       click: () => {
         clearAdminAccessUrl();
         pendingPoller?.stop();
@@ -619,26 +604,21 @@ function refreshTrayMenu() {
       }
     },
     {
-      label: 'Send Test Notification',
+      label: 'Test Bildirimi',
       click: () => {
         notificationService?.showNotification({
           id: `desktop-test-${Date.now()}`,
           title: 'Elvador Desktop',
-          body: 'Test bildirimi çalışıyor. Tıklayınca panel açılır.',
+          body: 'Test bildirimi çalışıyor.',
           url: '/admin',
           persist: true,
           category: 'desktop-test'
         });
       }
     },
-    {
-      label: 'Clear Notifications',
-      enabled: lastNotificationState.activeCount > 0,
-      click: () => notificationService?.clearAll()
-    },
     { type: 'separator' },
     {
-      label: 'Quit',
+      label: 'Çıkış',
       click: () => {
         isQuitting = true;
         pendingPoller?.stop();
