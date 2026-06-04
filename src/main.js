@@ -467,7 +467,8 @@ function createMainWindow(initialUrl = getStartupUrl()) {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: false,
+      webSecurity: true
     }
   });
 
@@ -514,6 +515,13 @@ function createMainWindow(initialUrl = getStartupUrl()) {
 
     event.preventDefault();
     shell.openExternal(url);
+  });
+
+  mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+    const headers = { ...details.responseHeaders };
+    delete headers['content-security-policy'];
+    delete headers['Content-Security-Policy'];
+    callback({ responseHeaders: headers });
   });
 
   mainWindow.webContents.on('did-finish-load', () => {
