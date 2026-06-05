@@ -11,7 +11,7 @@ const DEFAULT_NOTIFICATION_SOUND_OPTIONS = Object.freeze({
   profile: 'critical',
   soundTone: 'smoothChime',
   volume: 0.75,
-  criticalDurationMs: 30000
+  criticalDurationMs: 15000
 });
 const SOUND_PROFILES = new Set(['low', 'medium', 'high', 'critical']);
 const SOUND_TONES = new Set(['smoothChime', 'orderPing', 'warmBell', 'glassBell', 'mellowTap', 'classicBeep']);

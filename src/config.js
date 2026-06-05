@@ -1,6 +1,6 @@
 const DEFAULT_ADMIN_URL = 'https://chat.elvador.com/admin';
 const DEFAULT_PROTOCOL = 'elvador';
-const DEFAULT_NOTIFICATION_REMINDER_MS = 60000;
+const DEFAULT_NOTIFICATION_REMINDER_MS = 300000;
 
 function normalizeAdminUrl(value) {
   const candidate = String(value || '').trim();

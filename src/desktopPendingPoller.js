@@ -1,5 +1,5 @@
 const DEFAULT_POLL_INTERVAL_MS = 15000;
-const DEFAULT_REMINDER_INTERVAL_MS = 60000;
+const DEFAULT_REMINDER_INTERVAL_MS = 300000;
 
 const CATEGORY_COPY = {
   liveSupport: { title: 'Destek Bildirimi', label: 'destek talebi', sourceLabel: 'Destek', sourceInitials: 'DS' },
