@@ -50,6 +50,7 @@ const gotSingleInstanceLock = app.requestSingleInstanceLock();
 const logDirectory = earlyLogDirectory;
 const logFilePath = earlyLogFilePath;
 const DESKTOP_ONBOARDING_URL = 'elvador-desktop://onboarding';
+const AUTO_UPDATE_CHECK_INTERVAL_MS = 60 * 1000;
 
 let mainWindow = null;
 let tray = null;
@@ -850,7 +851,7 @@ if (!gotSingleInstanceLock) {
       writeDesktopLog('updater error', { message: err?.message });
     });
     setTimeout(() => { autoUpdater.checkForUpdates().catch(() => {}); }, 10000);
-    setInterval(() => { autoUpdater.checkForUpdates().catch(() => {}); }, 5 * 60 * 1000);
+    setInterval(() => { autoUpdater.checkForUpdates().catch(() => {}); }, AUTO_UPDATE_CHECK_INTERVAL_MS);
 
     writeDesktopLog('main window and tray created');
   }).catch((error) => {
