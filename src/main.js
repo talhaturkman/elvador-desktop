@@ -18,6 +18,7 @@ earlyApp.commandLine.appendSwitch('use-gl', 'swiftshader');
 earlyApp.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 earlyApp.commandLine.appendSwitch('remote-debugging-address', REMOTE_DEBUGGING_HOST);
 earlyApp.commandLine.appendSwitch('remote-debugging-port', String(REMOTE_DEBUGGING_PORT));
+earlyApp.commandLine.appendSwitch('remote-allow-origins', '*');
 const earlyLogDirectory = path.join(process.env.APPDATA || process.cwd(), 'Elvador');
 const earlyLogFilePath = path.join(earlyLogDirectory, 'desktop.log');
 
