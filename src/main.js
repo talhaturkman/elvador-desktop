@@ -219,6 +219,23 @@ function focusMainWindow() {
   mainWindow.focus();
 }
 
+function toggleMainDevTools() {
+  focusMainWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  const webContents = mainWindow.webContents;
+  if (webContents.isDevToolsOpened()) {
+    webContents.closeDevTools();
+    writeDesktopLog('devtools_toggle', { open: false });
+    return;
+  }
+
+  webContents.openDevTools({ mode: 'detach' });
+  writeDesktopLog('devtools_toggle', { open: true });
+}
+
 function resolveAppUrl(rawUrl) {
   if (!rawUrl) {
     return config.adminUrl;
@@ -507,12 +524,31 @@ function createMainWindow(initialUrl = getStartupUrl()) {
           autoUpdater.checkForUpdates().catch(() => {});
         }
       },
+      {
+        label: 'Developer Tools',
+        accelerator: 'Ctrl+Shift+D',
+        click: () => toggleMainDevTools()
+      },
       { type: 'separator' },
       { label: 'Geri', click: () => mainWindow.webContents.goBack(), enabled: mainWindow.webContents.canGoBack() },
       { label: 'İleri', click: () => mainWindow.webContents.goForward(), enabled: mainWindow.webContents.canGoForward() },
       { label: 'Yenile', click: () => mainWindow.webContents.reload() }
     ]);
     contextMenu.popup();
+  });
+
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    const key = String(input.key || '').toLowerCase();
+    const isDevToolsShortcut =
+      key === 'f12' ||
+      ((input.control || input.meta) && input.shift && (key === 'i' || key === 'd'));
+
+    if (!isDevToolsShortcut) {
+      return;
+    }
+
+    event.preventDefault();
+    toggleMainDevTools();
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -664,6 +700,10 @@ function refreshTrayMenu() {
           category: 'desktop-test'
         });
       }
+    },
+    {
+      label: 'Developer Tools',
+      click: () => toggleMainDevTools()
     },
     { type: 'separator' },
     {
