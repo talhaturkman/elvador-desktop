@@ -191,17 +191,46 @@ function escapePowerShellSingleQuotedValue(value) {
   return String(value || '').replace(/'/g, "''");
 }
 
-function buildPowerShellSoundScript({ soundFilePath, durationMs }) {
+function buildPowerShellSoundScript({ soundFilePath, durationMs, toneDurationMs }) {
   const repeatDelayMs = getRepeatDelayMs(durationMs);
   const escapedSoundFilePath = escapePowerShellSingleQuotedValue(soundFilePath);
   return [
-    '$ErrorActionPreference = "SilentlyContinue"',
-    `$player = New-Object System.Media.SoundPlayer('${escapedSoundFilePath}')`,
-    '$player.Load()',
-    `$end = [DateTime]::UtcNow.AddMilliseconds(${durationMs})`,
-    'while ([DateTime]::UtcNow -lt $end) {',
-    '  $player.PlaySync()',
-    `  Start-Sleep -Milliseconds ${repeatDelayMs}`,
+    '$ErrorActionPreference = "Stop"',
+    `$soundPath = '${escapedSoundFilePath}'`,
+    `$durationMs = ${durationMs}`,
+    `$toneDurationMs = ${toneDurationMs}`,
+    `$repeatDelayMs = ${repeatDelayMs}`,
+    '$end = [DateTime]::UtcNow.AddMilliseconds($durationMs)',
+    'try {',
+    '  $player = New-Object System.Media.SoundPlayer($soundPath)',
+    '  $player.Load()',
+    '  Write-Output "engine=soundplayer status=loaded"',
+    '  while ([DateTime]::UtcNow -lt $end) {',
+    '    $player.PlaySync()',
+    '    Start-Sleep -Milliseconds $repeatDelayMs',
+    '  }',
+    '  Write-Output "engine=soundplayer status=ok"',
+    '  exit 0',
+    '} catch {',
+    '  Write-Output ("engine=soundplayer status=fail message=" + $_.Exception.Message)',
+    '  try {',
+    '    Add-Type -AssemblyName PresentationCore',
+    '    $uri = New-Object System.Uri($soundPath)',
+    '    while ([DateTime]::UtcNow -lt $end) {',
+    '      $mediaPlayer = New-Object System.Windows.Media.MediaPlayer',
+    '      $mediaPlayer.Open($uri)',
+    '      $mediaPlayer.Play()',
+    '      Start-Sleep -Milliseconds $toneDurationMs',
+    '      $mediaPlayer.Stop()',
+    '      $mediaPlayer.Close()',
+    '      Start-Sleep -Milliseconds $repeatDelayMs',
+    '    }',
+    '    Write-Output "engine=mediaplayer status=ok"',
+    '    exit 0',
+    '  } catch {',
+    '    Write-Output ("engine=mediaplayer status=fail message=" + $_.Exception.Message)',
+    '    exit 2',
+    '  }',
     '}'
   ].join('; ');
 }
@@ -209,6 +238,26 @@ function buildPowerShellSoundScript({ soundFilePath, durationMs }) {
 function createNativeNotificationSoundService({ writeLog = () => {} } = {}) {
   const activeChildren = new Set();
   let lastStartedAt = 0;
+  let lastState = {
+    activeCount: 0,
+    lastResult: null,
+    lastExit: null,
+    lastError: null
+  };
+
+  function updateState(patch = {}) {
+    lastState = {
+      ...lastState,
+      ...patch,
+      activeCount: activeChildren.size,
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  function appendLimitedOutput(currentValue, chunk) {
+    const nextValue = `${currentValue || ''}${chunk || ''}`;
+    return nextValue.length > 1200 ? nextValue.slice(-1200) : nextValue;
+  }
 
   function stopNotificationSound(reason = 'manual') {
     const stoppedCount = activeChildren.size;
@@ -224,16 +273,19 @@ function createNativeNotificationSoundService({ writeLog = () => {} } = {}) {
       }
     }
     activeChildren.clear();
+    updateState({ lastStopReason: reason });
     writeLog('notification_sound_stop', { reason, count: stoppedCount });
   }
 
   function playNotificationSound(options = {}) {
     if (process.platform !== 'win32') {
+      updateState({ lastResult: { played: false, reason: 'unsupported_platform' } });
       return { played: false, reason: 'unsupported_platform' };
     }
 
     const now = Date.now();
     if (activeChildren.size > 0 && now - lastStartedAt < RESTART_COOLDOWN_MS) {
+      updateState({ lastResult: { played: false, reason: 'cooldown' } });
       return { played: false, reason: 'cooldown' };
     }
 
@@ -249,6 +301,16 @@ function createNativeNotificationSoundService({ writeLog = () => {} } = {}) {
       soundFilePath = ensureSoundFile(tone, volume);
     } catch (error) {
       writeLog('notification_sound_asset_error', { message: error?.message });
+      updateState({
+        lastError: {
+          stage: 'asset',
+          message: error?.message || String(error)
+        },
+        lastResult: {
+          played: false,
+          reason: 'asset_failed'
+        }
+      });
       return {
         played: false,
         reason: 'asset_failed',
@@ -256,12 +318,14 @@ function createNativeNotificationSoundService({ writeLog = () => {} } = {}) {
       };
     }
 
-    const script = buildPowerShellSoundScript({ soundFilePath, durationMs });
+    const toneDurationMs = getPatternDurationMs(TONE_PATTERNS[tone] || TONE_PATTERNS.smoothChime);
+    const script = buildPowerShellSoundScript({ soundFilePath, durationMs, toneDurationMs });
 
     try {
       const child = spawn(
         powershellPath,
         [
+          '-STA',
           '-NoProfile',
           '-NonInteractive',
           '-ExecutionPolicy',
@@ -273,29 +337,73 @@ function createNativeNotificationSoundService({ writeLog = () => {} } = {}) {
         ],
         {
           windowsHide: true,
-          stdio: 'ignore'
+          stdio: ['ignore', 'pipe', 'pipe']
         }
       );
 
       activeChildren.add(child);
       lastStartedAt = now;
+      let stdout = '';
+      let stderr = '';
+
+      child.stdout?.on('data', (chunk) => {
+        stdout = appendLimitedOutput(stdout, chunk.toString('utf8'));
+      });
+
+      child.stderr?.on('data', (chunk) => {
+        stderr = appendLimitedOutput(stderr, chunk.toString('utf8'));
+      });
 
       child.once('exit', (code, signal) => {
         activeChildren.delete(child);
-        writeLog('notification_sound_exit', { code, signal });
+        const exitState = {
+          code,
+          signal,
+          stdout: stdout.trim(),
+          stderr: stderr.trim()
+        };
+        updateState({
+          lastExit: exitState,
+          lastError: code === 0 ? null : {
+            stage: 'player_exit',
+            code,
+            stderr: exitState.stderr || null
+          }
+        });
+        writeLog('notification_sound_exit', exitState);
       });
 
       child.once('error', (error) => {
         activeChildren.delete(child);
-        writeLog('notification_sound_error', { message: error?.message });
+        const errorState = { stage: 'spawn_event', message: error?.message };
+        updateState({
+          lastError: errorState,
+          lastResult: {
+            played: false,
+            reason: 'spawn_event_error'
+          }
+        });
+        writeLog('notification_sound_error', errorState);
       });
 
       child.unref();
+      updateState({
+        lastResult: {
+          played: true,
+          engine: 'powershell-elvador-chime',
+          tone,
+          durationMs,
+          source: options.source || null
+        },
+        lastError: null
+      });
       writeLog('notification_sound_start', {
         durationMs,
         tone,
         profile: options.profile || null,
-        source: options.source || null
+        source: options.source || null,
+        fileSize: fs.statSync(soundFilePath).size,
+        shell: path.basename(powershellPath)
       });
 
       return {
@@ -306,6 +414,16 @@ function createNativeNotificationSoundService({ writeLog = () => {} } = {}) {
       };
     } catch (error) {
       writeLog('notification_sound_spawn_error', { message: error?.message });
+      updateState({
+        lastError: {
+          stage: 'spawn',
+          message: error?.message || String(error)
+        },
+        lastResult: {
+          played: false,
+          reason: 'spawn_failed'
+        }
+      });
       return {
         played: false,
         reason: 'spawn_failed',
@@ -316,7 +434,11 @@ function createNativeNotificationSoundService({ writeLog = () => {} } = {}) {
 
   return {
     playNotificationSound,
-    stopNotificationSound
+    stopNotificationSound,
+    getState: () => ({
+      ...lastState,
+      activeCount: activeChildren.size
+    })
   };
 }
 

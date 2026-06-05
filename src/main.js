@@ -196,6 +196,7 @@ function getCurrentMainWindowState() {
 function buildDiagnosticsReport() {
   const pollerState = pendingPoller?.getState() || null;
   const notificationState = notificationService?.getState() || lastNotificationState;
+  const soundState = notificationSoundService?.getState?.() || null;
   const settingsPath = app.isReady() ? getDesktopSettingsPath() : '';
 
   return {
@@ -223,6 +224,7 @@ function buildDiagnosticsReport() {
     lastLoadError,
     mainWindow: getCurrentMainWindowState(),
     notificationState,
+    soundState,
     pendingPollerState: pollerState,
     developerShortcutState,
     lastDevToolsRequestAt,
@@ -277,6 +279,20 @@ function openDesktopLogFile() {
   } catch (error) {
     writeDesktopLog('desktop_log_open_error', { message: error?.message });
   }
+}
+
+function playSoundTest(source = 'manual-sound-test') {
+  const result = notificationSoundService?.playNotificationSound({
+    source,
+    previewDurationMs: 7000,
+    profile: 'medium'
+  }) || {
+    played: false,
+    reason: 'sound_service_unavailable'
+  };
+
+  writeDesktopLog('notification_sound_test', result);
+  return result;
 }
 
 writeDesktopLog('main module loaded', {
@@ -884,6 +900,10 @@ function createMainWindow(initialUrl = getStartupUrl()) {
         }
       },
       {
+        label: 'Ses Testi',
+        click: () => playSoundTest('context-menu-sound-test')
+      },
+      {
         label: 'Developer Tools',
         accelerator: 'Ctrl+Shift+D',
         click: () => openOrFocusMainDevTools()
@@ -1077,6 +1097,10 @@ function refreshTrayMenu() {
           category: 'desktop-test'
         });
       }
+    },
+    {
+      label: 'Ses Testi',
+      click: () => playSoundTest('tray-sound-test')
     },
     {
       label: 'Developer Tools',
