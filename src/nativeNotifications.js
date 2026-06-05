@@ -6,6 +6,14 @@ const OVERLAY_MARGIN = 16;
 const OVERLAY_GAP = 10;
 const OVERLAY_CHANNEL_OPEN = 'elvador:overlay-notification-open';
 const OPENED_NOTIFICATION_SILENCE_MS = 90000;
+const DEFAULT_NOTIFICATION_SOUND_OPTIONS = Object.freeze({
+  profile: 'critical',
+  soundTone: 'smoothChime',
+  volume: 0.75,
+  criticalDurationMs: 30000
+});
+const SOUND_PROFILES = new Set(['low', 'medium', 'high', 'critical']);
+const SOUND_TONES = new Set(['smoothChime', 'orderPing', 'warmBell', 'glassBell', 'mellowTap', 'classicBeep']);
 
 const CATEGORY_UI = Object.freeze({
   liveSupport: { label: 'Destek', initials: 'DS', accent: '#2563eb' },
@@ -71,6 +79,24 @@ function sanitizeColor(value, fallback) {
 function coercePositiveNumber(value) {
   const numberValue = Number(value);
   return Number.isFinite(numberValue) && numberValue > 0 ? Math.round(numberValue) : null;
+}
+
+function coerceSoundVolume(value) {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) {
+    return DEFAULT_NOTIFICATION_SOUND_OPTIONS.volume;
+  }
+  return Math.min(1, Math.max(0, numberValue));
+}
+
+function normalizeSoundProfile(value) {
+  const profile = String(value || '').trim();
+  return SOUND_PROFILES.has(profile) ? profile : DEFAULT_NOTIFICATION_SOUND_OPTIONS.profile;
+}
+
+function normalizeSoundTone(value) {
+  const tone = String(value || '').trim();
+  return SOUND_TONES.has(tone) ? tone : DEFAULT_NOTIFICATION_SOUND_OPTIONS.soundTone;
 }
 
 function parseCountFromText(value) {
@@ -180,6 +206,19 @@ function sanitizeNotificationPayload(payload = {}) {
   };
 }
 
+function buildNotificationSoundOptions(notification, payload = {}) {
+  return {
+    source: normalizeText(payload.soundSource || payload.source) || 'native-notification',
+    id: notification.id,
+    category: notification.category,
+    profile: normalizeSoundProfile(payload.profile || payload.soundProfile),
+    soundTone: normalizeSoundTone(payload.soundTone || payload.tone),
+    volume: coerceSoundVolume(payload.volume ?? payload.soundVolume),
+    criticalDurationMs: coercePositiveNumber(payload.criticalDurationMs)
+      || DEFAULT_NOTIFICATION_SOUND_OPTIONS.criticalDurationMs
+  };
+}
+
 function escapeHtml(value) {
   return String(value || '')
     .replace(/&/g, '&amp;')
@@ -256,6 +295,7 @@ function createNativeNotificationService({
   focusApp,
   openInApp,
   playSound = () => ({ played: false, reason: 'sound_service_unavailable' }),
+  stopSound = () => {},
   writeLog = () => {},
   onChange = () => {}
 }) {
@@ -348,6 +388,7 @@ function createNativeNotificationService({
     activeNotifications.delete(notificationId);
     rememberOpenedNotification(record.payload);
     closeRecord(record);
+    stopSound('notification_open');
     emitChange();
     repositionOverlays();
     focusApp();
@@ -451,11 +492,7 @@ function createNativeNotificationService({
     activeNotifications.set(normalized.id, record);
     record.overlayWindow = createOverlayWindow(record);
     const soundResult = normalized.playSound
-      ? playSound({
-        source: 'native-notification',
-        id: normalized.id,
-        category: normalized.category
-      })
+      ? playSound(buildNotificationSoundOptions(normalized, payload))
       : { played: false, reason: 'disabled_for_payload' };
     writeLog('notification shown', {
       id: normalized.id,
@@ -477,10 +514,14 @@ function createNativeNotificationService({
   }
 
   function clearAll() {
+    const hadNotifications = activeNotifications.size > 0;
     for (const record of activeNotifications.values()) {
       closeRecord(record);
     }
     activeNotifications.clear();
+    if (hadNotifications) {
+      stopSound('notification_clear_all');
+    }
     emitChange();
   }
 

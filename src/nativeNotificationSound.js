@@ -5,6 +5,8 @@ const { spawn } = require('child_process');
 
 const SAMPLE_RATE = 44100;
 const DEFAULT_SOUND_DURATION_MS = 1400;
+const DEFAULT_MEDIUM_DURATION_MS = 2200;
+const DEFAULT_HIGH_DURATION_MS = 4200;
 const DEFAULT_CRITICAL_DURATION_MS = 30000;
 const DEFAULT_PREVIEW_DURATION_MS = 7000;
 const MAX_SOUND_DURATION_MS = 5 * 60 * 1000;
@@ -63,6 +65,11 @@ function normalizeTone(value) {
   return TONE_PATTERNS[value] ? value : 'smoothChime';
 }
 
+function normalizeProfile(value) {
+  const profile = String(value || '').trim();
+  return ['low', 'medium', 'high', 'critical'].includes(profile) ? profile : '';
+}
+
 function getPowerShellPath() {
   const systemRoot = process.env.SystemRoot || process.env.WINDIR;
   const defaultPath = systemRoot
@@ -77,8 +84,15 @@ function getSoundDurationMs(options = {}) {
     return coerceDurationMs(options.previewDurationMs, DEFAULT_PREVIEW_DURATION_MS);
   }
 
-  if (options.profile === 'critical') {
+  const profile = normalizeProfile(options.profile);
+  if (profile === 'critical') {
     return coerceDurationMs(options.criticalDurationMs, DEFAULT_CRITICAL_DURATION_MS);
+  }
+  if (profile === 'high') {
+    return coerceDurationMs(options.highDurationMs, DEFAULT_HIGH_DURATION_MS);
+  }
+  if (profile === 'medium') {
+    return coerceDurationMs(options.mediumDurationMs, DEFAULT_MEDIUM_DURATION_MS);
   }
 
   return DEFAULT_SOUND_DURATION_MS;

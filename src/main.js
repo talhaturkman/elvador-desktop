@@ -1250,6 +1250,7 @@ if (!gotSingleInstanceLock) {
       focusApp: focusMainWindow,
       openInApp,
       playSound: (options) => notificationSoundService.playNotificationSound(options),
+      stopSound: (reason) => notificationSoundService.stopNotificationSound(reason),
       writeLog: writeDesktopLog,
       onChange: (state) => {
         lastNotificationState = state;
