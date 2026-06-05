@@ -63,6 +63,8 @@ let lastLoadError = null;
 let lastLoadedUrl = config.adminUrl;
 let lastNotificationState = { activeCount: 0, activeIds: [] };
 let desktopSettings = {};
+let developerShortcutState = {};
+let lastDevToolsRequestAt = null;
 
 function writeDesktopLog(message, details = null) {
   try {
@@ -73,6 +75,115 @@ function writeDesktopLog(message, details = null) {
     fs.appendFileSync(logFilePath, `[${new Date().toISOString()}] ${message}${detailText}\n`);
   } catch (_) {
     // Logging must never break app startup.
+  }
+}
+
+function redactUrlToken(value) {
+  const text = String(value || '');
+  if (!text) {
+    return '';
+  }
+  return text.replace(/(\/admin-access\/)([A-Za-z0-9_-]{8})[A-Za-z0-9_-]+/i, '$1$2...');
+}
+
+function getCurrentMainWindowState() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return {
+      exists: false
+    };
+  }
+
+  const bounds = mainWindow.getBounds();
+  const webContents = mainWindow.webContents;
+  return {
+    exists: true,
+    visible: mainWindow.isVisible(),
+    minimized: mainWindow.isMinimized(),
+    focused: mainWindow.isFocused(),
+    bounds,
+    url: webContents.getURL(),
+    devToolsOpened: webContents.isDevToolsOpened(),
+    crashed: typeof webContents.isCrashed === 'function' ? webContents.isCrashed() : false
+  };
+}
+
+function buildDiagnosticsReport() {
+  const pollerState = pendingPoller?.getState() || null;
+  const notificationState = notificationService?.getState() || lastNotificationState;
+  const settingsPath = app.isReady() ? getDesktopSettingsPath() : '';
+
+  return {
+    generatedAt: new Date().toISOString(),
+    version: app.getVersion(),
+    packaged: app.isPackaged,
+    platform: process.platform,
+    arch: process.arch,
+    execPath: process.execPath,
+    cwd: process.cwd(),
+    resourcesPath: process.resourcesPath || '',
+    userData: app.isReady() ? app.getPath('userData') : '',
+    appData: process.env.APPDATA || '',
+    argv: process.argv,
+    adminUrl: config.adminUrl,
+    apiBaseUrl: config.apiBaseUrl,
+    startupUrl: redactUrlToken(getStartupUrl()),
+    lastLoadedUrl: redactUrlToken(lastLoadedUrl),
+    lastLoadError,
+    mainWindow: getCurrentMainWindowState(),
+    notificationState,
+    pendingPollerState: pollerState,
+    developerShortcutState,
+    lastDevToolsRequestAt,
+    logFilePath,
+    settingsPath,
+    settingsFileExists: settingsPath ? fs.existsSync(settingsPath) : false
+  };
+}
+
+function writeDiagnosticsReport() {
+  const reportPath = path.join(app.getPath('userData'), 'desktop-diagnostics.txt');
+  const report = buildDiagnosticsReport();
+  const text = [
+    'Elvador Desktop Diagnostics',
+    JSON.stringify(report, null, 2)
+  ].join('\n\n');
+
+  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
+  fs.writeFileSync(reportPath, text, 'utf8');
+  writeDesktopLog('diagnostics_report_write', { reportPath });
+  return reportPath;
+}
+
+function openDiagnosticsReport() {
+  try {
+    const reportPath = writeDiagnosticsReport();
+    shell.openPath(reportPath).then((errorMessage) => {
+      if (errorMessage) {
+        writeDesktopLog('diagnostics_report_open_error', { message: errorMessage });
+        shell.showItemInFolder(reportPath);
+      }
+    });
+    return reportPath;
+  } catch (error) {
+    writeDesktopLog('diagnostics_report_error', { message: error?.message });
+    return null;
+  }
+}
+
+function openDesktopLogFile() {
+  try {
+    fs.mkdirSync(path.dirname(logFilePath), { recursive: true });
+    if (!fs.existsSync(logFilePath)) {
+      fs.writeFileSync(logFilePath, '', 'utf8');
+    }
+    shell.openPath(logFilePath).then((errorMessage) => {
+      if (errorMessage) {
+        writeDesktopLog('desktop_log_open_error', { message: errorMessage });
+        shell.showItemInFolder(logFilePath);
+      }
+    });
+  } catch (error) {
+    writeDesktopLog('desktop_log_open_error', { message: error?.message });
   }
 }
 
@@ -221,9 +332,11 @@ function focusMainWindow() {
 }
 
 function toggleMainDevTools() {
+  lastDevToolsRequestAt = new Date().toISOString();
   focusMainWindow();
   if (!mainWindow || mainWindow.isDestroyed()) {
     writeDesktopLog('devtools_toggle_skip', { reason: 'main_window_unavailable' });
+    openDiagnosticsReport();
     return;
   }
 
@@ -241,8 +354,21 @@ function toggleMainDevTools() {
       mode: 'right',
       url: webContents.getURL()
     });
+    setTimeout(() => {
+      if (!mainWindow || mainWindow.isDestroyed() || webContents.isDestroyed()) {
+        writeDesktopLog('devtools_open_verify', { opened: false, reason: 'destroyed' });
+        return;
+      }
+
+      const opened = webContents.isDevToolsOpened();
+      writeDesktopLog('devtools_open_verify', { opened });
+      if (!opened) {
+        openDiagnosticsReport();
+      }
+    }, 1200);
   } catch (error) {
     writeDesktopLog('devtools_toggle_error', { message: error?.message });
+    openDiagnosticsReport();
   }
 }
 
@@ -254,8 +380,10 @@ function registerDeveloperShortcuts() {
   ].forEach((accelerator) => {
     try {
       const registered = globalShortcut.register(accelerator, toggleMainDevTools);
+      developerShortcutState[accelerator] = registered;
       writeDesktopLog('devtools_shortcut_register', { accelerator, registered });
     } catch (error) {
+      developerShortcutState[accelerator] = false;
       writeDesktopLog('devtools_shortcut_register_error', {
         accelerator,
         message: error?.message
@@ -540,6 +668,11 @@ function createMainWindow(initialUrl = getStartupUrl()) {
   mainWindow.webContents.on('context-menu', (_event, params) => {
     const contextMenu = Menu.buildFromTemplate([
       {
+        label: `Version ${app.getVersion()}`,
+        enabled: false
+      },
+      { type: 'separator' },
+      {
         label: 'QR/Link Sıfırla',
         click: () => {
           clearAdminAccessUrl();
@@ -557,6 +690,14 @@ function createMainWindow(initialUrl = getStartupUrl()) {
         label: 'Developer Tools',
         accelerator: 'Ctrl+Shift+D',
         click: () => toggleMainDevTools()
+      },
+      {
+        label: 'Tani Raporu Ac',
+        click: () => openDiagnosticsReport()
+      },
+      {
+        label: 'Log Dosyasini Ac',
+        click: () => openDesktopLogFile()
       },
       { type: 'separator' },
       { label: 'Geri', click: () => mainWindow.webContents.goBack(), enabled: mainWindow.webContents.canGoBack() },
@@ -680,6 +821,7 @@ function refreshTrayMenu() {
   const loadStatusLabel = lastLoadError
     ? 'Status: Panel yüklenemedi'
     : 'Status: Panel hazir';
+  const versionStatusLabel = `Version: ${app.getVersion()}`;
   const pollerState = pendingPoller?.getState();
   const savedAdminAccessUrl = getSavedAdminAccessUrl();
   const accessStatusLabel = savedAdminAccessUrl
@@ -691,6 +833,10 @@ function refreshTrayMenu() {
     : 'Notifier: oturum bekliyor';
 
   tray.setContextMenu(Menu.buildFromTemplate([
+    {
+      label: versionStatusLabel,
+      enabled: false
+    },
     {
       label: loadStatusLabel,
       enabled: false
@@ -733,6 +879,14 @@ function refreshTrayMenu() {
     {
       label: 'Developer Tools',
       click: () => toggleMainDevTools()
+    },
+    {
+      label: 'Tani Raporu Ac',
+      click: () => openDiagnosticsReport()
+    },
+    {
+      label: 'Log Dosyasini Ac',
+      click: () => openDesktopLogFile()
     },
     { type: 'separator' },
     {
