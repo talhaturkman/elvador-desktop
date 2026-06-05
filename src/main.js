@@ -42,6 +42,7 @@ const {
 const { autoUpdater } = require('electron-updater');
 const { getDesktopConfig } = require('./config');
 const { createNativeNotificationService } = require('./nativeNotifications');
+const { createNativeNotificationSoundService } = require('./nativeNotificationSound');
 const { createDesktopPendingPoller } = require('./desktopPendingPoller');
 
 const config = getDesktopConfig();
@@ -53,6 +54,7 @@ const DESKTOP_ONBOARDING_URL = 'elvador-desktop://onboarding';
 let mainWindow = null;
 let tray = null;
 let notificationService = null;
+let notificationSoundService = null;
 let pendingPoller = null;
 let isQuitting = false;
 let lastLoadError = null;
@@ -669,6 +671,7 @@ function refreshTrayMenu() {
         isQuitting = true;
         pendingPoller?.stop();
         notificationService?.clearAll();
+        notificationSoundService?.stopNotificationSound('quit');
         app.quit();
       }
     }
@@ -730,6 +733,18 @@ function registerIpcHandlers() {
   ipcMain.handle('elvador:show-native-notification', (_event, payload = {}) => {
     return notificationService.showNotification(payload);
   });
+
+  ipcMain.handle('elvador:play-notification-sound', (_event, options = {}) => {
+    return notificationSoundService?.playNotificationSound(options) || {
+      played: false,
+      reason: 'sound_service_unavailable'
+    };
+  });
+
+  ipcMain.handle('elvador:stop-notification-sound', (_event, reason = 'renderer_request') => {
+    notificationSoundService?.stopNotificationSound(reason);
+    return { stopped: true };
+  });
 }
 
 if (!gotSingleInstanceLock) {
@@ -768,6 +783,9 @@ if (!gotSingleInstanceLock) {
     }
     configureAutoStart();
     app.setAsDefaultProtocolClient(config.protocol);
+    notificationSoundService = createNativeNotificationSoundService({
+      writeLog: writeDesktopLog
+    });
 
     const iconPath = getAppIconPath();
     notificationService = createNativeNotificationService({
@@ -775,6 +793,7 @@ if (!gotSingleInstanceLock) {
       overlayPreloadPath: path.join(__dirname, 'overlayPreload.js'),
       focusApp: focusMainWindow,
       openInApp,
+      playSound: (options) => notificationSoundService.playNotificationSound(options),
       writeLog: writeDesktopLog,
       onChange: (state) => {
         lastNotificationState = state;
@@ -848,6 +867,7 @@ if (!gotSingleInstanceLock) {
   app.on('before-quit', () => {
     isQuitting = true;
     pendingPoller?.stop();
+    notificationSoundService?.stopNotificationSound('before_quit');
   });
 
   app.on('window-all-closed', () => {

@@ -175,7 +175,8 @@ function sanitizeNotificationPayload(payload = {}) {
     accentColor: sanitizeColor(payload.accentColor, categoryUi.accent),
     count,
     ageLabel,
-    persist: payload.persist !== false
+    persist: payload.persist !== false,
+    playSound: payload.playSound !== false && payload.silent !== true
   };
 }
 
@@ -254,6 +255,7 @@ function createNativeNotificationService({
   overlayPreloadPath,
   focusApp,
   openInApp,
+  playSound = () => ({ played: false, reason: 'sound_service_unavailable' }),
   writeLog = () => {},
   onChange = () => {}
 }) {
@@ -448,12 +450,20 @@ function createNativeNotificationService({
 
     activeNotifications.set(normalized.id, record);
     record.overlayWindow = createOverlayWindow(record);
+    const soundResult = normalized.playSound
+      ? playSound({
+        source: 'native-notification',
+        id: normalized.id,
+        category: normalized.category
+      })
+      : { played: false, reason: 'disabled_for_payload' };
     writeLog('notification shown', {
       id: normalized.id,
       title: normalized.title,
       category: normalized.category,
       overlay: true,
-      native: false
+      native: false,
+      sound: soundResult?.played ? 'played' : soundResult?.reason || 'not_played'
     });
     emitChange();
     repositionOverlays();
