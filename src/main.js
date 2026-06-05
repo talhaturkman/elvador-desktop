@@ -38,6 +38,7 @@ const {
   globalShortcut,
   ipcMain,
   nativeImage,
+  screen,
   shell
 } = require('electron');
 const { autoUpdater } = require('electron-updater');
@@ -103,6 +104,7 @@ function getCurrentMainWindowState() {
     bounds,
     url: webContents.getURL(),
     devToolsOpened: webContents.isDevToolsOpened(),
+    devToolsWindow: getDevToolsWindowState(webContents),
     crashed: typeof webContents.isCrashed === 'function' ? webContents.isCrashed() : false
   };
 }
@@ -331,7 +333,101 @@ function focusMainWindow() {
   mainWindow.focus();
 }
 
-function toggleMainDevTools() {
+function getDevToolsWindow(webContents) {
+  const devToolsWebContents = webContents?.devToolsWebContents;
+  if (!devToolsWebContents || devToolsWebContents.isDestroyed()) {
+    return null;
+  }
+
+  return BrowserWindow.fromWebContents(devToolsWebContents);
+}
+
+function getDevToolsWindowState(webContents) {
+  const devToolsWebContents = webContents?.devToolsWebContents;
+  const devToolsWindow = getDevToolsWindow(webContents);
+
+  return {
+    webContentsExists: !!devToolsWebContents && !devToolsWebContents.isDestroyed(),
+    windowExists: !!devToolsWindow,
+    visible: devToolsWindow ? devToolsWindow.isVisible() : false,
+    minimized: devToolsWindow ? devToolsWindow.isMinimized() : false,
+    focused: devToolsWindow ? devToolsWindow.isFocused() : false,
+    bounds: devToolsWindow ? devToolsWindow.getBounds() : null,
+    url: devToolsWebContents && !devToolsWebContents.isDestroyed() ? devToolsWebContents.getURL() : ''
+  };
+}
+
+function getCenteredDevToolsBounds() {
+  const display = mainWindow && !mainWindow.isDestroyed()
+    ? screen.getDisplayMatching(mainWindow.getBounds())
+    : screen.getPrimaryDisplay();
+  const area = display.workArea;
+  const width = Math.min(area.width, Math.max(720, Math.min(1120, Math.floor(area.width * 0.82))));
+  const height = Math.min(area.height, Math.max(560, Math.min(820, Math.floor(area.height * 0.82))));
+
+  return {
+    x: area.x + Math.max(0, Math.floor((area.width - width) / 2)),
+    y: area.y + Math.max(0, Math.floor((area.height - height) / 2)),
+    width,
+    height
+  };
+}
+
+function focusDetachedDevTools(webContents) {
+  const devToolsWindow = getDevToolsWindow(webContents);
+  if (!devToolsWindow) {
+    return {
+      focused: false,
+      reason: webContents?.devToolsWebContents ? 'devtools_window_unavailable' : 'devtools_webcontents_unavailable',
+      state: getDevToolsWindowState(webContents)
+    };
+  }
+
+  try {
+    if (devToolsWindow.isMinimized()) {
+      devToolsWindow.restore();
+    }
+
+    devToolsWindow.setBounds(getCenteredDevToolsBounds());
+    devToolsWindow.show();
+    devToolsWindow.focus();
+    if (typeof devToolsWindow.moveTop === 'function') {
+      devToolsWindow.moveTop();
+    }
+
+    return {
+      focused: true,
+      state: getDevToolsWindowState(webContents)
+    };
+  } catch (error) {
+    return {
+      focused: false,
+      reason: 'devtools_focus_error',
+      message: error?.message,
+      state: getDevToolsWindowState(webContents)
+    };
+  }
+}
+
+function verifyMainDevToolsOpen(webContents) {
+  if (!mainWindow || mainWindow.isDestroyed() || webContents.isDestroyed()) {
+    writeDesktopLog('devtools_open_verify', { opened: false, reason: 'destroyed' });
+    return;
+  }
+
+  const opened = webContents.isDevToolsOpened();
+  const focusResult = opened ? focusDetachedDevTools(webContents) : null;
+  writeDesktopLog('devtools_open_verify', {
+    opened,
+    focusResult,
+    devToolsWindow: getDevToolsWindowState(webContents)
+  });
+  if (!opened || !focusResult?.focused) {
+    openDiagnosticsReport();
+  }
+}
+
+function openOrFocusMainDevTools() {
   lastDevToolsRequestAt = new Date().toISOString();
   focusMainWindow();
   if (!mainWindow || mainWindow.isDestroyed()) {
@@ -343,32 +439,43 @@ function toggleMainDevTools() {
   const webContents = mainWindow.webContents;
   try {
     if (webContents.isDevToolsOpened()) {
-      webContents.closeDevTools();
-      writeDesktopLog('devtools_toggle', { open: false });
-      return;
-    }
-
-    webContents.openDevTools({ mode: 'right', activate: true });
-    writeDesktopLog('devtools_toggle', {
-      open: true,
-      mode: 'right',
-      url: webContents.getURL()
-    });
-    setTimeout(() => {
-      if (!mainWindow || mainWindow.isDestroyed() || webContents.isDestroyed()) {
-        writeDesktopLog('devtools_open_verify', { opened: false, reason: 'destroyed' });
+      const focusResult = focusDetachedDevTools(webContents);
+      if (focusResult.focused) {
+        writeDesktopLog('devtools_focus', focusResult);
         return;
       }
 
-      const opened = webContents.isDevToolsOpened();
-      writeDesktopLog('devtools_open_verify', { opened });
-      if (!opened) {
-        openDiagnosticsReport();
-      }
-    }, 1200);
+      webContents.closeDevTools();
+      writeDesktopLog('devtools_reopen_detached', focusResult);
+    }
+
+    webContents.once('devtools-opened', () => {
+      const focusResult = focusDetachedDevTools(webContents);
+      writeDesktopLog('devtools_opened_event', focusResult);
+    });
+    webContents.openDevTools({ mode: 'detach', activate: true });
+    writeDesktopLog('devtools_toggle', {
+      open: true,
+      mode: 'detach',
+      url: webContents.getURL()
+    });
+    setTimeout(() => verifyMainDevToolsOpen(webContents), 1200);
   } catch (error) {
     writeDesktopLog('devtools_toggle_error', { message: error?.message });
     openDiagnosticsReport();
+  }
+}
+
+function closeMainDevTools() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  try {
+    mainWindow.webContents.closeDevTools();
+    writeDesktopLog('devtools_toggle', { open: false });
+  } catch (error) {
+    writeDesktopLog('devtools_close_error', { message: error?.message });
   }
 }
 
@@ -379,7 +486,7 @@ function registerDeveloperShortcuts() {
     'CommandOrControl+Shift+D'
   ].forEach((accelerator) => {
     try {
-      const registered = globalShortcut.register(accelerator, toggleMainDevTools);
+      const registered = globalShortcut.register(accelerator, openOrFocusMainDevTools);
       developerShortcutState[accelerator] = registered;
       writeDesktopLog('devtools_shortcut_register', { accelerator, registered });
     } catch (error) {
@@ -689,7 +796,12 @@ function createMainWindow(initialUrl = getStartupUrl()) {
       {
         label: 'Developer Tools',
         accelerator: 'Ctrl+Shift+D',
-        click: () => toggleMainDevTools()
+        click: () => openOrFocusMainDevTools()
+      },
+      {
+        label: 'Developer Tools Kapat',
+        enabled: mainWindow.webContents.isDevToolsOpened(),
+        click: () => closeMainDevTools()
       },
       {
         label: 'Tani Raporu Ac',
@@ -718,7 +830,7 @@ function createMainWindow(initialUrl = getStartupUrl()) {
     }
 
     event.preventDefault();
-    toggleMainDevTools();
+    openOrFocusMainDevTools();
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -878,7 +990,12 @@ function refreshTrayMenu() {
     },
     {
       label: 'Developer Tools',
-      click: () => toggleMainDevTools()
+      click: () => openOrFocusMainDevTools()
+    },
+    {
+      label: 'Developer Tools Kapat',
+      enabled: mainWindow?.webContents?.isDevToolsOpened() || false,
+      click: () => closeMainDevTools()
     },
     {
       label: 'Tani Raporu Ac',
