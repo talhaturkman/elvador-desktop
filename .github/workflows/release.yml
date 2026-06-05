@@ -36,6 +36,18 @@ jobs:
       - name: Build unpacked app
         run: npx electron-builder --win --dir --publish never
 
+      - name: Write updater metadata
+        run: node scripts/write-app-update-yml.js
+
+      - name: Verify updater metadata
+        shell: pwsh
+        run: |
+          $path = "release/win-unpacked/resources/app-update.yml"
+          if (!(Test-Path $path)) {
+            throw "Missing $path"
+          }
+          Get-Content $path
+
       - name: Embed icon into exe
         run: node scripts/post-build-icon.js
 
@@ -46,6 +58,7 @@ jobs:
         with:
           files: |
             release/*.exe
+            release/*.blockmap
             release/latest.yml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
