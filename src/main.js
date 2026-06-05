@@ -1,5 +1,14 @@
 const path = require('path');
 const fs = require('fs');
+
+const { app: earlyApp } = require('electron');
+earlyApp.disableHardwareAcceleration();
+earlyApp.commandLine.appendSwitch('disable-gpu');
+earlyApp.commandLine.appendSwitch('disable-gpu-compositing');
+earlyApp.commandLine.appendSwitch('disable-gpu-sandbox');
+earlyApp.commandLine.appendSwitch('disable-software-rasterizer');
+earlyApp.commandLine.appendSwitch('use-gl', 'swiftshader');
+earlyApp.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 const earlyLogDirectory = path.join(process.env.APPDATA || process.cwd(), 'Elvador');
 const earlyLogFilePath = path.join(earlyLogDirectory, 'desktop.log');
 
@@ -472,7 +481,8 @@ function createMainWindow(initialUrl = getStartupUrl()) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
-      webSecurity: true
+      webSecurity: true,
+      autoplayPolicy: 'no-user-gesture-required'
     }
   });
 
