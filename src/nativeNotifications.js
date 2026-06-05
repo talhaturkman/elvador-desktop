@@ -1,4 +1,4 @@
-const { BrowserWindow, ipcMain, screen } = require('electron');
+const { BrowserWindow, ipcMain, screen, shell } = require('electron');
 
 const OVERLAY_WIDTH = 280;
 const OVERLAY_HEIGHT = 56;
@@ -448,6 +448,7 @@ function createNativeNotificationService({
 
     activeNotifications.set(normalized.id, record);
     record.overlayWindow = createOverlayWindow(record);
+    shell.beep();
     writeLog('notification shown', {
       id: normalized.id,
       title: normalized.title,
