@@ -6,6 +6,7 @@ const OVERLAY_MARGIN = 16;
 const OVERLAY_GAP = 10;
 const OVERLAY_CHANNEL_OPEN = 'elvador:overlay-notification-open';
 const OPENED_NOTIFICATION_SILENCE_MS = 90000;
+const ACTIVE_DUPLICATE_SUPPRESS_MS = 45000;
 const DEFAULT_NOTIFICATION_SOUND_OPTIONS = Object.freeze({
   profile: 'critical',
   soundTone: 'smoothChime',
@@ -168,6 +169,18 @@ function buildOpenedNotificationFingerprint(notification) {
   return [
     notification.category,
     notification.count
+  ].join('|');
+}
+
+function buildActiveNotificationFingerprint(notification) {
+  if (!notification.count || !notification.url) {
+    return '';
+  }
+
+  return [
+    notification.category,
+    notification.count,
+    notification.url
   ].join('|');
 }
 
@@ -348,6 +361,29 @@ function createNativeNotificationService({
     return Boolean(fingerprint && recentlyOpenedFingerprints.has(fingerprint));
   }
 
+  function findRecentActiveDuplicate(payload) {
+    const fingerprint = buildActiveNotificationFingerprint(payload);
+    if (!fingerprint) {
+      return null;
+    }
+
+    const now = Date.now();
+    for (const record of activeNotifications.values()) {
+      if (!record || record.isClosing) {
+        continue;
+      }
+
+      if (
+        buildActiveNotificationFingerprint(record.payload) === fingerprint
+        && now - record.createdAt <= ACTIVE_DUPLICATE_SUPPRESS_MS
+      ) {
+        return record;
+      }
+    }
+
+    return null;
+  }
+
   function repositionOverlays() {
     const display = screen.getPrimaryDisplay();
     const workArea = display.workArea;
@@ -466,6 +502,22 @@ function createNativeNotificationService({
         shown: false,
         id: normalized.id,
         reason: 'recently_opened'
+      };
+    }
+
+    const activeDuplicate = findRecentActiveDuplicate(normalized);
+    if (activeDuplicate) {
+      writeLog('notification duplicate suppressed', {
+        id: normalized.id,
+        activeId: activeDuplicate.payload.id,
+        category: normalized.category,
+        count: normalized.count,
+        ageMs: Date.now() - activeDuplicate.createdAt
+      });
+      return {
+        shown: false,
+        id: normalized.id,
+        reason: 'active_duplicate'
       };
     }
 
