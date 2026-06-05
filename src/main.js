@@ -36,12 +36,16 @@ const previousStartupState = readEarlyStartupState();
 const GPU_SAFE_MODE_REQUESTED =
   process.argv.includes('--elvador-gpu-safe-mode') ||
   process.env.ELVADOR_GPU_SAFE_MODE === 'true';
+const GPU_SAFE_MODE_PERSISTED =
+  previousStartupState?.persistGpuSafeMode === true;
 const GPU_SAFE_MODE_AUTO_FALLBACK =
   !GPU_SAFE_MODE_REQUESTED &&
+  !GPU_SAFE_MODE_PERSISTED &&
   previousStartupState?.gpuSafeModeEnabled !== true &&
   isRecentStartingState(previousStartupState);
 const GPU_SAFE_MODE_ENABLED =
   GPU_SAFE_MODE_REQUESTED ||
+  GPU_SAFE_MODE_PERSISTED ||
   GPU_SAFE_MODE_AUTO_FALLBACK;
 
 writeEarlyStartupState({
@@ -52,7 +56,9 @@ writeEarlyStartupState({
   launchFlags: process.argv.slice(1).filter((arg) => String(arg || '').startsWith('--')),
   gpuSafeModeEnabled: GPU_SAFE_MODE_ENABLED,
   gpuSafeModeRequested: GPU_SAFE_MODE_REQUESTED,
+  gpuSafeModePersisted: GPU_SAFE_MODE_PERSISTED,
   gpuSafeModeAutoFallback: GPU_SAFE_MODE_AUTO_FALLBACK,
+  persistGpuSafeMode: GPU_SAFE_MODE_PERSISTED,
   previousStatus: previousStartupState?.status || null,
   previousStartedAt: previousStartupState?.startedAt || null,
   previousUpdatedAt: previousStartupState?.updatedAt || null
@@ -87,6 +93,7 @@ writeEarlyDesktopLog('main file entered', {
   cwd: process.cwd(),
   gpuSafeModeEnabled: GPU_SAFE_MODE_ENABLED,
   gpuSafeModeRequested: GPU_SAFE_MODE_REQUESTED,
+  gpuSafeModePersisted: GPU_SAFE_MODE_PERSISTED,
   gpuSafeModeAutoFallback: GPU_SAFE_MODE_AUTO_FALLBACK,
   previousStartupStatus: previousStartupState?.status || null
 });
@@ -149,7 +156,9 @@ function markStartupState(status, details = {}) {
     version: app?.isReady?.() ? app.getVersion() : undefined,
     gpuSafeModeEnabled: GPU_SAFE_MODE_ENABLED,
     gpuSafeModeRequested: GPU_SAFE_MODE_REQUESTED,
+    gpuSafeModePersisted: GPU_SAFE_MODE_PERSISTED,
     gpuSafeModeAutoFallback: GPU_SAFE_MODE_AUTO_FALLBACK,
+    persistGpuSafeMode: GPU_SAFE_MODE_PERSISTED || GPU_SAFE_MODE_AUTO_FALLBACK,
     ...details
   });
 }
@@ -197,6 +206,7 @@ function buildDiagnosticsReport() {
     arch: process.arch,
     gpuSafeModeEnabled: GPU_SAFE_MODE_ENABLED,
     gpuSafeModeRequested: GPU_SAFE_MODE_REQUESTED,
+    gpuSafeModePersisted: GPU_SAFE_MODE_PERSISTED,
     gpuSafeModeAutoFallback: GPU_SAFE_MODE_AUTO_FALLBACK,
     startupStatePath,
     previousStartupState,
@@ -1281,6 +1291,7 @@ if (!gotSingleInstanceLock) {
       });
       writeDesktopLog('startup marked stable', {
         gpuSafeModeEnabled: GPU_SAFE_MODE_ENABLED,
+        gpuSafeModePersisted: GPU_SAFE_MODE_PERSISTED,
         gpuSafeModeAutoFallback: GPU_SAFE_MODE_AUTO_FALLBACK
       });
     }, 30000);
