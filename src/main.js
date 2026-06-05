@@ -135,6 +135,11 @@ let desktopSettings = {};
 let developerShortcutState = {};
 let lastDevToolsRequestAt = null;
 let startupStableTimer = null;
+let updatePromptState = {
+  open: false,
+  promptedVersion: null,
+  dismissedVersion: null
+};
 
 function writeDesktopLog(message, details = null) {
   try {
@@ -1287,6 +1292,21 @@ if (!gotSingleInstanceLock) {
     });
     autoUpdater.on('update-downloaded', (info) => {
       writeDesktopLog('update downloaded', { version: info?.version });
+      const updateVersion = String(info?.version || '').trim() || 'unknown';
+      if (updatePromptState.open) {
+        writeDesktopLog('update_prompt_skip', { version: updateVersion, reason: 'already_open' });
+        return;
+      }
+      if (updatePromptState.dismissedVersion === updateVersion || updatePromptState.promptedVersion === updateVersion) {
+        writeDesktopLog('update_prompt_skip', { version: updateVersion, reason: 'already_prompted' });
+        return;
+      }
+      updatePromptState = {
+        open: true,
+        promptedVersion: updateVersion,
+        dismissedVersion: updatePromptState.dismissedVersion
+      };
+      writeDesktopLog('update_prompt_show', { version: updateVersion });
       const { dialog } = require('electron');
       dialog.showMessageBox(mainWindow || null, {
         type: 'info',
@@ -1297,7 +1317,17 @@ if (!gotSingleInstanceLock) {
         defaultId: 0,
         noLink: true
       }).then((result) => {
-        if (result.response === 0) {
+        const accepted = result.response === 0;
+        updatePromptState = {
+          open: false,
+          promptedVersion: updateVersion,
+          dismissedVersion: accepted ? updatePromptState.dismissedVersion : updateVersion
+        };
+        writeDesktopLog('update_prompt_choice', {
+          version: updateVersion,
+          choice: accepted ? 'install' : 'later'
+        });
+        if (accepted) {
           isQuitting = true;
           setImmediate(() => autoUpdater.quitAndInstall(false, true));
         }
