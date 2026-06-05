@@ -1,6 +1,13 @@
 const path = require('path');
 const fs = require('fs');
 
+const REMOTE_DEBUGGING_HOST = '127.0.0.1';
+const parsedRemoteDebuggingPort = Number(process.env.ELVADOR_REMOTE_DEBUGGING_PORT || 8315);
+const REMOTE_DEBUGGING_PORT = Number.isInteger(parsedRemoteDebuggingPort) && parsedRemoteDebuggingPort > 0
+  ? parsedRemoteDebuggingPort
+  : 8315;
+const REMOTE_DEBUGGING_URL = `http://${REMOTE_DEBUGGING_HOST}:${REMOTE_DEBUGGING_PORT}`;
+
 const { app: earlyApp } = require('electron');
 earlyApp.disableHardwareAcceleration();
 earlyApp.commandLine.appendSwitch('disable-gpu');
@@ -9,6 +16,8 @@ earlyApp.commandLine.appendSwitch('disable-gpu-sandbox');
 earlyApp.commandLine.appendSwitch('disable-software-rasterizer');
 earlyApp.commandLine.appendSwitch('use-gl', 'swiftshader');
 earlyApp.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+earlyApp.commandLine.appendSwitch('remote-debugging-address', REMOTE_DEBUGGING_HOST);
+earlyApp.commandLine.appendSwitch('remote-debugging-port', String(REMOTE_DEBUGGING_PORT));
 const earlyLogDirectory = path.join(process.env.APPDATA || process.cwd(), 'Elvador');
 const earlyLogFilePath = path.join(earlyLogDirectory, 'desktop.log');
 
@@ -66,6 +75,7 @@ let lastNotificationState = { activeCount: 0, activeIds: [] };
 let desktopSettings = {};
 let developerShortcutState = {};
 let lastDevToolsRequestAt = null;
+let lastRemoteInspectorRequestAt = null;
 
 function writeDesktopLog(message, details = null) {
   try {
@@ -136,6 +146,12 @@ function buildDiagnosticsReport() {
     pendingPollerState: pollerState,
     developerShortcutState,
     lastDevToolsRequestAt,
+    remoteDebugging: {
+      host: REMOTE_DEBUGGING_HOST,
+      port: REMOTE_DEBUGGING_PORT,
+      url: REMOTE_DEBUGGING_URL
+    },
+    lastRemoteInspectorRequestAt,
     logFilePath,
     settingsPath,
     settingsFileExists: settingsPath ? fs.existsSync(settingsPath) : false
@@ -333,6 +349,22 @@ function focusMainWindow() {
   mainWindow.focus();
 }
 
+function openRemoteDeveloperInspector(reason = 'manual') {
+  lastRemoteInspectorRequestAt = new Date().toISOString();
+  writeDesktopLog('devtools_remote_open', {
+    reason,
+    url: REMOTE_DEBUGGING_URL
+  });
+  shell.openExternal(REMOTE_DEBUGGING_URL).catch((error) => {
+    writeDesktopLog('devtools_remote_open_error', {
+      reason,
+      url: REMOTE_DEBUGGING_URL,
+      message: error?.message
+    });
+    openDiagnosticsReport();
+  });
+}
+
 function getDevToolsWindow(webContents) {
   const devToolsWebContents = webContents?.devToolsWebContents;
   if (!devToolsWebContents || devToolsWebContents.isDestroyed()) {
@@ -423,6 +455,7 @@ function verifyMainDevToolsOpen(webContents) {
     devToolsWindow: getDevToolsWindowState(webContents)
   });
   if (!opened || !focusResult?.focused) {
+    openRemoteDeveloperInspector('devtools_open_failed');
     openDiagnosticsReport();
   }
 }
@@ -799,6 +832,10 @@ function createMainWindow(initialUrl = getStartupUrl()) {
         click: () => openOrFocusMainDevTools()
       },
       {
+        label: 'Developer Inspector (Tarayici)',
+        click: () => openRemoteDeveloperInspector('context_menu')
+      },
+      {
         label: 'Developer Tools Kapat',
         enabled: mainWindow.webContents.isDevToolsOpened(),
         click: () => closeMainDevTools()
@@ -991,6 +1028,10 @@ function refreshTrayMenu() {
     {
       label: 'Developer Tools',
       click: () => openOrFocusMainDevTools()
+    },
+    {
+      label: 'Developer Inspector (Tarayici)',
+      click: () => openRemoteDeveloperInspector('tray_menu')
     },
     {
       label: 'Developer Tools Kapat',
