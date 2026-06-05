@@ -35,6 +35,7 @@ const {
   BrowserWindow,
   Menu,
   Tray,
+  globalShortcut,
   ipcMain,
   nativeImage,
   shell
@@ -222,18 +223,45 @@ function focusMainWindow() {
 function toggleMainDevTools() {
   focusMainWindow();
   if (!mainWindow || mainWindow.isDestroyed()) {
+    writeDesktopLog('devtools_toggle_skip', { reason: 'main_window_unavailable' });
     return;
   }
 
   const webContents = mainWindow.webContents;
-  if (webContents.isDevToolsOpened()) {
-    webContents.closeDevTools();
-    writeDesktopLog('devtools_toggle', { open: false });
-    return;
-  }
+  try {
+    if (webContents.isDevToolsOpened()) {
+      webContents.closeDevTools();
+      writeDesktopLog('devtools_toggle', { open: false });
+      return;
+    }
 
-  webContents.openDevTools({ mode: 'detach' });
-  writeDesktopLog('devtools_toggle', { open: true });
+    webContents.openDevTools({ mode: 'right', activate: true });
+    writeDesktopLog('devtools_toggle', {
+      open: true,
+      mode: 'right',
+      url: webContents.getURL()
+    });
+  } catch (error) {
+    writeDesktopLog('devtools_toggle_error', { message: error?.message });
+  }
+}
+
+function registerDeveloperShortcuts() {
+  [
+    'F12',
+    'CommandOrControl+Shift+I',
+    'CommandOrControl+Shift+D'
+  ].forEach((accelerator) => {
+    try {
+      const registered = globalShortcut.register(accelerator, toggleMainDevTools);
+      writeDesktopLog('devtools_shortcut_register', { accelerator, registered });
+    } catch (error) {
+      writeDesktopLog('devtools_shortcut_register_error', {
+        accelerator,
+        message: error?.message
+      });
+    }
+  });
 }
 
 function resolveAppUrl(rawUrl) {
@@ -502,6 +530,7 @@ function createMainWindow(initialUrl = getStartupUrl()) {
       nodeIntegration: false,
       sandbox: false,
       webSecurity: true,
+      devTools: true,
       autoplayPolicy: 'no-user-gesture-required'
     }
   });
@@ -824,6 +853,7 @@ if (!gotSingleInstanceLock) {
     }
     configureAutoStart();
     app.setAsDefaultProtocolClient(config.protocol);
+    registerDeveloperShortcuts();
     notificationSoundService = createNativeNotificationSoundService({
       writeLog: writeDesktopLog
     });
@@ -909,6 +939,7 @@ if (!gotSingleInstanceLock) {
     isQuitting = true;
     pendingPoller?.stop();
     notificationSoundService?.stopNotificationSound('before_quit');
+    globalShortcut.unregisterAll();
   });
 
   app.on('window-all-closed', () => {
