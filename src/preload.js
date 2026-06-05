@@ -3,14 +3,12 @@ const { contextBridge, ipcRenderer } = require('electron');
 const PANEL_VISUAL_NOTIFICATION_SELECTOR = '.admin-visual-alert-ribbon';
 const PANEL_VISUAL_NOTIFICATION_REMINDER_MS = 60000;
 const PANEL_FALLBACK_SUPPRESS_AFTER_DIRECT_MS = 8000;
-const DIRECT_NATIVE_SOUND_SUPPRESS_MS = 2500;
 
 let lastSyncedSessionKey = null;
 let lastPanelNotificationCount = 0;
 let lastPanelNotificationSignature = '';
 let lastPanelNotificationAt = 0;
 let lastDirectNativeNotificationAt = 0;
-let lastNativeSoundRequestAt = 0;
 let panelNotificationObserver = null;
 let panelNotificationEvaluateTimer = null;
 
@@ -384,19 +382,17 @@ function startPanelVisualNotificationObserver() {
 
 function showNativeNotificationFromPage(payload = {}) {
   lastDirectNativeNotificationAt = Date.now();
-  const nativeSoundRecentlyRequested = Date.now() - lastNativeSoundRequestAt <= DIRECT_NATIVE_SOUND_SUPPRESS_MS;
   return ipcRenderer.invoke(
     'elvador:show-native-notification',
     enrichNotificationPayloadFromPanel({
       ...payload,
       bridgeSource: 'page-direct',
-      playSound: payload.playSound === false ? false : !nativeSoundRecentlyRequested
+      playSound: payload.playSound === true
     })
   );
 }
 
 function playNotificationSoundFromPage(options = {}) {
-  lastNativeSoundRequestAt = Date.now();
   return ipcRenderer.invoke('elvador:play-notification-sound', {
     ...options,
     source: options.source || 'page-direct'
@@ -404,9 +400,6 @@ function playNotificationSoundFromPage(options = {}) {
 }
 
 function stopNotificationSoundFromPage(reason = 'page-direct') {
-  if (reason === 'page_restart') {
-    lastNativeSoundRequestAt = Date.now();
-  }
   return ipcRenderer.invoke('elvador:stop-notification-sound', reason);
 }
 
