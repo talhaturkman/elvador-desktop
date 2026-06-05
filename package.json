@@ -1,6 +1,6 @@
 {
   "name": "elvador-desktop",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "private": true,
   "description": "Elvador Windows desktop shell and native notification engine",
   "author": "Elvador",
@@ -52,6 +52,8 @@
     },
     "nsis": {
       "artifactName": "${productName}-Setup-${version}-${arch}.${ext}",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
       "oneClick": true,
       "perMachine": false,
       "createDesktopShortcut": "always",
