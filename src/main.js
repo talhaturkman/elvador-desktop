@@ -1,9 +1,62 @@
 const path = require('path');
 const fs = require('fs');
 
-const GPU_SAFE_MODE_ENABLED =
+const earlyLogDirectory = path.join(process.env.APPDATA || process.cwd(), 'Elvador');
+const earlyLogFilePath = path.join(earlyLogDirectory, 'desktop.log');
+const startupStatePath = path.join(earlyLogDirectory, 'desktop-startup-state.json');
+const STARTUP_AUTO_SAFE_MODE_WINDOW_MS = 10 * 60 * 1000;
+
+function readEarlyStartupState() {
+  try {
+    return JSON.parse(fs.readFileSync(startupStatePath, 'utf8'));
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeEarlyStartupState(nextState = {}) {
+  try {
+    fs.mkdirSync(path.dirname(startupStatePath), { recursive: true });
+    fs.writeFileSync(startupStatePath, JSON.stringify(nextState, null, 2), 'utf8');
+  } catch (_) {
+    // Startup recovery state must never break app startup.
+  }
+}
+
+function isRecentStartingState(state) {
+  if (!state || state.status !== 'starting' || !state.startedAt) {
+    return false;
+  }
+
+  const startedAt = Date.parse(state.startedAt);
+  return Number.isFinite(startedAt) && Date.now() - startedAt < STARTUP_AUTO_SAFE_MODE_WINDOW_MS;
+}
+
+const previousStartupState = readEarlyStartupState();
+const GPU_SAFE_MODE_REQUESTED =
   process.argv.includes('--elvador-gpu-safe-mode') ||
   process.env.ELVADOR_GPU_SAFE_MODE === 'true';
+const GPU_SAFE_MODE_AUTO_FALLBACK =
+  !GPU_SAFE_MODE_REQUESTED &&
+  previousStartupState?.gpuSafeModeEnabled !== true &&
+  isRecentStartingState(previousStartupState);
+const GPU_SAFE_MODE_ENABLED =
+  GPU_SAFE_MODE_REQUESTED ||
+  GPU_SAFE_MODE_AUTO_FALLBACK;
+
+writeEarlyStartupState({
+  status: 'starting',
+  startedAt: new Date().toISOString(),
+  pid: process.pid,
+  execPath: process.execPath,
+  launchFlags: process.argv.slice(1).filter((arg) => String(arg || '').startsWith('--')),
+  gpuSafeModeEnabled: GPU_SAFE_MODE_ENABLED,
+  gpuSafeModeRequested: GPU_SAFE_MODE_REQUESTED,
+  gpuSafeModeAutoFallback: GPU_SAFE_MODE_AUTO_FALLBACK,
+  previousStatus: previousStartupState?.status || null,
+  previousStartedAt: previousStartupState?.startedAt || null,
+  previousUpdatedAt: previousStartupState?.updatedAt || null
+});
 
 const { app: earlyApp } = require('electron');
 if (GPU_SAFE_MODE_ENABLED) {
@@ -15,8 +68,6 @@ if (GPU_SAFE_MODE_ENABLED) {
   earlyApp.commandLine.appendSwitch('use-gl', 'swiftshader');
 }
 earlyApp.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
-const earlyLogDirectory = path.join(process.env.APPDATA || process.cwd(), 'Elvador');
-const earlyLogFilePath = path.join(earlyLogDirectory, 'desktop.log');
 
 function writeEarlyDesktopLog(message, details = null) {
   try {
@@ -34,7 +85,10 @@ writeEarlyDesktopLog('main file entered', {
   argv: process.argv,
   execPath: process.execPath,
   cwd: process.cwd(),
-  gpuSafeModeEnabled: GPU_SAFE_MODE_ENABLED
+  gpuSafeModeEnabled: GPU_SAFE_MODE_ENABLED,
+  gpuSafeModeRequested: GPU_SAFE_MODE_REQUESTED,
+  gpuSafeModeAutoFallback: GPU_SAFE_MODE_AUTO_FALLBACK,
+  previousStartupStatus: previousStartupState?.status || null
 });
 
 const {
@@ -73,6 +127,7 @@ let lastNotificationState = { activeCount: 0, activeIds: [] };
 let desktopSettings = {};
 let developerShortcutState = {};
 let lastDevToolsRequestAt = null;
+let startupStableTimer = null;
 
 function writeDesktopLog(message, details = null) {
   try {
@@ -84,6 +139,19 @@ function writeDesktopLog(message, details = null) {
   } catch (_) {
     // Logging must never break app startup.
   }
+}
+
+function markStartupState(status, details = {}) {
+  writeEarlyStartupState({
+    status,
+    updatedAt: new Date().toISOString(),
+    pid: process.pid,
+    version: app?.isReady?.() ? app.getVersion() : undefined,
+    gpuSafeModeEnabled: GPU_SAFE_MODE_ENABLED,
+    gpuSafeModeRequested: GPU_SAFE_MODE_REQUESTED,
+    gpuSafeModeAutoFallback: GPU_SAFE_MODE_AUTO_FALLBACK,
+    ...details
+  });
 }
 
 function redactUrlToken(value) {
@@ -128,6 +196,10 @@ function buildDiagnosticsReport() {
     platform: process.platform,
     arch: process.arch,
     gpuSafeModeEnabled: GPU_SAFE_MODE_ENABLED,
+    gpuSafeModeRequested: GPU_SAFE_MODE_REQUESTED,
+    gpuSafeModeAutoFallback: GPU_SAFE_MODE_AUTO_FALLBACK,
+    startupStatePath,
+    previousStartupState,
     execPath: process.execPath,
     cwd: process.cwd(),
     resourcesPath: process.resourcesPath || '',
@@ -1203,6 +1275,15 @@ if (!gotSingleInstanceLock) {
     setInterval(() => { autoUpdater.checkForUpdates().catch(() => {}); }, AUTO_UPDATE_CHECK_INTERVAL_MS);
 
     writeDesktopLog('main window and tray created');
+    startupStableTimer = setTimeout(() => {
+      markStartupState('stable', {
+        stableAt: new Date().toISOString()
+      });
+      writeDesktopLog('startup marked stable', {
+        gpuSafeModeEnabled: GPU_SAFE_MODE_ENABLED,
+        gpuSafeModeAutoFallback: GPU_SAFE_MODE_AUTO_FALLBACK
+      });
+    }, 30000);
   }).catch((error) => {
     writeDesktopLog('app ready failed', {
       message: error?.message,
@@ -1216,6 +1297,13 @@ if (!gotSingleInstanceLock) {
 
   app.on('before-quit', () => {
     isQuitting = true;
+    if (startupStableTimer) {
+      clearTimeout(startupStableTimer);
+      startupStableTimer = null;
+    }
+    markStartupState('quit', {
+      quitAt: new Date().toISOString()
+    });
     pendingPoller?.stop();
     notificationSoundService?.stopNotificationSound('before_quit');
     globalShortcut.unregisterAll();
