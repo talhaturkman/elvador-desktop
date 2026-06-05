@@ -84,9 +84,13 @@ process.on('unhandledRejection', (error) => {
 });
 
 function getAppIconPath() {
-  const packagedIconPath = path.join(process.resourcesPath || '', 'icon-512.png');
-  const repoIconPath = path.join(__dirname, '..', 'assets', 'icon-512.png');
-  return app.isPackaged ? packagedIconPath : repoIconPath;
+  const packagedIconPath = path.join(process.resourcesPath || '', 'icon.ico');
+  const repoIconPath = path.join(__dirname, '..', 'assets', 'icon.ico');
+  const fallbackPath = path.join(__dirname, '..', 'assets', 'icon-512.png');
+  if (app.isPackaged) {
+    return fs.existsSync(packagedIconPath) ? packagedIconPath : path.join(process.resourcesPath || '', 'icon-512.png');
+  }
+  return fs.existsSync(repoIconPath) ? repoIconPath : fallbackPath;
 }
 
 function getDesktopSettingsPath() {

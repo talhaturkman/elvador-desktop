@@ -1,6 +1,6 @@
 {
   "name": "elvador-desktop",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
   "description": "Elvador Windows desktop shell and native notification engine",
   "author": "Elvador",
@@ -30,6 +30,10 @@
     ],
     "extraResources": [
       {
+        "from": "assets/icon.ico",
+        "to": "icon.ico"
+      },
+      {
         "from": "assets/icon-512.png",
         "to": "icon-512.png"
       }
@@ -40,7 +44,7 @@
       "repo": "elvador-desktop"
     },
     "win": {
-      "icon": "assets/icon-512.png",
+      "icon": "assets/icon.ico",
       "signAndEditExecutable": false,
       "target": [
         "nsis"
