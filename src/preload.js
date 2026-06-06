@@ -1,7 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 const PANEL_VISUAL_NOTIFICATION_SELECTOR = '.admin-visual-alert-ribbon';
-const PANEL_VISUAL_NOTIFICATION_REMINDER_MS = 60000;
+const PANEL_VISUAL_NOTIFICATION_REMINDER_MS = 300000;
 const PANEL_FALLBACK_SUPPRESS_AFTER_DIRECT_MS = 8000;
 
 let lastSyncedSessionKey = null;
