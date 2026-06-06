@@ -207,6 +207,9 @@ function buildDiagnosticsReport() {
   return {
     generatedAt: new Date().toISOString(),
     version: app.getVersion(),
+    appDisplayName: config.appDisplayName,
+    legacyWindowsBuild: config.legacyWindowsBuild,
+    autoUpdateEnabled: config.autoUpdateEnabled,
     packaged: app.isPackaged,
     platform: process.platform,
     arch: process.arch,
@@ -898,12 +901,17 @@ function createMainWindow(initialUrl = getStartupUrl()) {
           loadDesktopOnboardingPage();
         }
       },
-      {
-        label: 'Güncelleme Kontrol Et',
-        click: () => {
-          autoUpdater.checkForUpdates().catch(() => {});
-        }
-      },
+      config.autoUpdateEnabled
+        ? {
+            label: 'Güncelleme Kontrol Et',
+            click: () => {
+              autoUpdater.checkForUpdates().catch(() => {});
+            }
+          }
+        : {
+            label: 'Legacy: Güncelleme Kapali',
+            enabled: false
+          },
       {
         label: 'Ses Testi',
         click: () => playSoundTest('context-menu-sound-test')
@@ -1035,7 +1043,7 @@ function configureAutoStart() {
 function createTray() {
   const iconPath = getAppIconPath();
   tray = new Tray(createTrayIcon(iconPath));
-  tray.setToolTip('Elvador');
+  tray.setToolTip(config.appDisplayName);
   refreshTrayMenu();
   tray.on('click', () => focusMainWindow());
 }
@@ -1150,6 +1158,9 @@ function registerIpcHandlers() {
     adminUrl: config.adminUrl,
     apiBaseUrl: config.apiBaseUrl,
     version: app.getVersion(),
+    appDisplayName: config.appDisplayName,
+    legacyWindowsBuild: config.legacyWindowsBuild,
+    autoUpdateEnabled: config.autoUpdateEnabled,
     notificationState: notificationService?.getState() || lastNotificationState,
     pendingPollerState: pendingPoller?.getState() || null,
     lastLoadError
@@ -1237,7 +1248,7 @@ if (!gotSingleInstanceLock) {
       apiBaseUrl: config.apiBaseUrl
     });
 
-    app.setName('Elvador');
+    app.setName(config.appDisplayName);
     if (process.platform === 'win32') {
       app.setAppUserModelId(config.appUserModelId);
     }
@@ -1284,60 +1295,66 @@ if (!gotSingleInstanceLock) {
         });
       }, 1200);
     }
-    autoUpdater.logger = { info: (m) => writeDesktopLog('updater:info', m), warn: (m) => writeDesktopLog('updater:warn', m), error: (m) => writeDesktopLog('updater:error', m) };
-    autoUpdater.autoDownload = true;
-    autoUpdater.autoInstallOnAppQuit = true;
-    autoUpdater.on('update-available', (info) => {
-      writeDesktopLog('update available', { version: info?.version });
-    });
-    autoUpdater.on('update-downloaded', (info) => {
-      writeDesktopLog('update downloaded', { version: info?.version });
-      const updateVersion = String(info?.version || '').trim() || 'unknown';
-      if (updatePromptState.open) {
-        writeDesktopLog('update_prompt_skip', { version: updateVersion, reason: 'already_open' });
-        return;
-      }
-      if (updatePromptState.dismissedVersion === updateVersion || updatePromptState.promptedVersion === updateVersion) {
-        writeDesktopLog('update_prompt_skip', { version: updateVersion, reason: 'already_prompted' });
-        return;
-      }
-      updatePromptState = {
-        open: true,
-        promptedVersion: updateVersion,
-        dismissedVersion: updatePromptState.dismissedVersion
-      };
-      writeDesktopLog('update_prompt_show', { version: updateVersion });
-      const { dialog } = require('electron');
-      dialog.showMessageBox(mainWindow || null, {
-        type: 'info',
-        title: 'Güncelleme Hazır',
-        message: `Elvador v${info?.version} indirildi.`,
-        detail: 'Güncellemeyi yüklemek için uygulama yeniden başlatılacak.',
-        buttons: ['Şimdi Yeniden Başlat', 'Sonra'],
-        defaultId: 0,
-        noLink: true
-      }).then((result) => {
-        const accepted = result.response === 0;
-        updatePromptState = {
-          open: false,
-          promptedVersion: updateVersion,
-          dismissedVersion: accepted ? updatePromptState.dismissedVersion : updateVersion
-        };
-        writeDesktopLog('update_prompt_choice', {
-          version: updateVersion,
-          choice: accepted ? 'install' : 'later'
-        });
-        if (accepted) {
-          isQuitting = true;
-          setImmediate(() => autoUpdater.quitAndInstall(false, true));
-        }
+    if (config.autoUpdateEnabled) {
+      autoUpdater.logger = { info: (m) => writeDesktopLog('updater:info', m), warn: (m) => writeDesktopLog('updater:warn', m), error: (m) => writeDesktopLog('updater:error', m) };
+      autoUpdater.autoDownload = true;
+      autoUpdater.autoInstallOnAppQuit = true;
+      autoUpdater.on('update-available', (info) => {
+        writeDesktopLog('update available', { version: info?.version });
       });
-    });
-    autoUpdater.on('error', (err) => {
-      writeDesktopLog('updater error', { message: err?.message });
-    });
-    setTimeout(() => { autoUpdater.checkForUpdates().catch(() => {}); }, 10000);
-    setInterval(() => { autoUpdater.checkForUpdates().catch(() => {}); }, AUTO_UPDATE_CHECK_INTERVAL_MS);
+      autoUpdater.on('update-downloaded', (info) => {
+        writeDesktopLog('update downloaded', { version: info?.version });
+        const updateVersion = String(info?.version || '').trim() || 'unknown';
+        if (updatePromptState.open) {
+          writeDesktopLog('update_prompt_skip', { version: updateVersion, reason: 'already_open' });
+          return;
+        }
+        if (updatePromptState.dismissedVersion === updateVersion || updatePromptState.promptedVersion === updateVersion) {
+          writeDesktopLog('update_prompt_skip', { version: updateVersion, reason: 'already_prompted' });
+          return;
+        }
+        updatePromptState = {
+          open: true,
+          promptedVersion: updateVersion,
+          dismissedVersion: updatePromptState.dismissedVersion
+        };
+        writeDesktopLog('update_prompt_show', { version: updateVersion });
+        const { dialog } = require('electron');
+        dialog.showMessageBox(mainWindow || null, {
+          type: 'info',
+          title: 'Güncelleme Hazır',
+          message: `Elvador v${info?.version} indirildi.`,
+          detail: 'Güncellemeyi yüklemek için uygulama yeniden başlatılacak.',
+          buttons: ['Şimdi Yeniden Başlat', 'Sonra'],
+          defaultId: 0,
+          noLink: true
+        }).then((result) => {
+          const accepted = result.response === 0;
+          updatePromptState = {
+            open: false,
+            promptedVersion: updateVersion,
+            dismissedVersion: accepted ? updatePromptState.dismissedVersion : updateVersion
+          };
+          writeDesktopLog('update_prompt_choice', {
+            version: updateVersion,
+            choice: accepted ? 'install' : 'later'
+          });
+          if (accepted) {
+            isQuitting = true;
+            setImmediate(() => autoUpdater.quitAndInstall(false, true));
+          }
+        });
+      });
+      autoUpdater.on('error', (err) => {
+        writeDesktopLog('updater error', { message: err?.message });
+      });
+      setTimeout(() => { autoUpdater.checkForUpdates().catch(() => {}); }, 10000);
+      setInterval(() => { autoUpdater.checkForUpdates().catch(() => {}); }, AUTO_UPDATE_CHECK_INTERVAL_MS);
+    } else {
+      writeDesktopLog('auto updater disabled', {
+        legacyWindowsBuild: config.legacyWindowsBuild
+      });
+    }
 
     writeDesktopLog('main window and tray created');
     startupStableTimer = setTimeout(() => {

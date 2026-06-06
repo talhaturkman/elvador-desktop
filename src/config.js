@@ -1,6 +1,7 @@
 const DEFAULT_ADMIN_URL = 'https://chat.elvador.com/admin';
 const DEFAULT_PROTOCOL = 'elvador';
 const DEFAULT_NOTIFICATION_REMINDER_MS = 300000;
+const LEGACY_WINDOWS_BUILD = true;
 
 function normalizeAdminUrl(value) {
   const candidate = String(value || '').trim();
@@ -43,13 +44,16 @@ function getDesktopConfig() {
   return {
     adminUrl,
     apiBaseUrl: normalizeApiBaseUrl(process.env.ELVADOR_API_BASE_URL, adminUrl),
-    appUserModelId: process.env.ELVADOR_APP_USER_MODEL_ID || 'com.elvador.desktop',
+    appDisplayName: process.env.ELVADOR_APP_DISPLAY_NAME || (LEGACY_WINDOWS_BUILD ? 'Elvador Legacy' : 'Elvador'),
+    appUserModelId: process.env.ELVADOR_APP_USER_MODEL_ID || (LEGACY_WINDOWS_BUILD ? 'com.elvador.desktop.legacy' : 'com.elvador.desktop'),
     autoStartEnabled: process.env.ELVADOR_AUTO_START !== 'false',
+    autoUpdateEnabled: !LEGACY_WINDOWS_BUILD && process.env.ELVADOR_AUTO_UPDATE !== 'false',
+    legacyWindowsBuild: LEGACY_WINDOWS_BUILD,
     notificationReminderMs: normalizePositiveInteger(
       process.env.ELVADOR_NOTIFICATION_REMINDER_MS,
       DEFAULT_NOTIFICATION_REMINDER_MS
     ),
-    protocol: process.env.ELVADOR_PROTOCOL || DEFAULT_PROTOCOL
+    protocol: process.env.ELVADOR_PROTOCOL || (LEGACY_WINDOWS_BUILD ? 'elvador-legacy' : DEFAULT_PROTOCOL)
   };
 }
 
@@ -57,5 +61,6 @@ module.exports = {
   DEFAULT_ADMIN_URL,
   DEFAULT_NOTIFICATION_REMINDER_MS,
   DEFAULT_PROTOCOL,
+  LEGACY_WINDOWS_BUILD,
   getDesktopConfig
 };

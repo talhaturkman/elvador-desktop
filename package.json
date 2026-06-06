@@ -1,28 +1,29 @@
 {
-  "name": "elvador-desktop",
-  "version": "0.25.19",
+  "name": "elvador-desktop-legacy",
+  "version": "0.25.19-legacy.1",
   "private": true,
-  "description": "Elvador Windows desktop shell and native notification engine",
+  "description": "Elvador legacy Windows 7 32-bit desktop shell",
   "author": "Elvador",
   "main": "src/main.js",
   "scripts": {
     "dev": "electron .",
     "pack": "electron-builder --dir",
     "build:win": "electron-builder --win nsis portable",
+    "build:legacy": "electron-builder --win --ia32 --dir --publish never && node scripts/post-build-icon.js && electron-builder --win nsis portable --ia32 --prepackaged release/win-ia32-unpacked --publish never",
     "build:release": "electron-builder --win --dir --publish never && node scripts/write-app-update-yml.js && node scripts/post-build-icon.js && npx electron-builder --win nsis --prepackaged release/win-unpacked --publish never"
   },
   "dependencies": {
     "electron-updater": "^6.6.2"
   },
   "devDependencies": {
-    "electron": "42.3.3",
+    "electron": "22.3.27",
     "electron-builder": "26.8.1",
     "rcedit": "^5.0.2",
     "sharp": "^0.34.5"
   },
   "build": {
-    "appId": "com.elvador.desktop",
-    "productName": "Elvador",
+    "appId": "com.elvador.desktop.legacy",
+    "productName": "Elvador Legacy",
     "directories": {
       "output": "release"
     },
@@ -47,21 +48,23 @@
       "repo": "elvador-desktop"
     },
     "win": {
+      "artifactName": "Elvador-Legacy-${version}-${arch}.${ext}",
       "icon": "assets/icon.ico",
       "signAndEditExecutable": false,
       "target": [
-        "nsis"
+        "nsis",
+        "portable"
       ]
     },
     "nsis": {
-      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}",
+      "artifactName": "Elvador-Legacy-Setup-${version}-${arch}.${ext}",
       "installerIcon": "assets/icon.ico",
       "uninstallerIcon": "assets/icon.ico",
       "oneClick": true,
       "perMachine": false,
       "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
-      "shortcutName": "Elvador",
+      "shortcutName": "Elvador Legacy",
       "runAfterFinish": true
     }
   }
