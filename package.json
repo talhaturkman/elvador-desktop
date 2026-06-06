@@ -1,12 +1,13 @@
 {
   "name": "elvador-desktop",
-  "version": "0.25.19",
+  "version": "0.25.20",
   "private": true,
   "description": "Elvador Windows desktop shell and native notification engine",
   "author": "Elvador",
   "main": "src/main.js",
   "scripts": {
     "dev": "electron .",
+    "icons": "node scripts/generate-icons.js",
     "pack": "electron-builder --dir",
     "build:win": "electron-builder --win nsis portable",
     "build:release": "electron-builder --win --dir --publish never && node scripts/write-app-update-yml.js && node scripts/post-build-icon.js && npx electron-builder --win nsis --prepackaged release/win-unpacked --publish never"
