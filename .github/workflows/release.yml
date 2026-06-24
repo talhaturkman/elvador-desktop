@@ -80,8 +80,8 @@ jobs:
       - name: Separate updater manifests per arch
         shell: pwsh
         run: |
-          Rename-Item release/latest.yml release/latest-ia32.yml
-          Rename-Item release/latest-x64-backup.yml release/latest.yml
+          Rename-Item -Path release/latest.yml -NewName latest-ia32.yml
+          Rename-Item -Path release/latest-x64-backup.yml -NewName latest.yml
 
       # ── Upload release artifacts ──
       - uses: softprops/action-gh-release@v2
