@@ -927,6 +927,15 @@ function createMainWindow(initialUrl = getStartupUrl()) {
         click: () => openDesktopLogFile()
       },
       { type: 'separator' },
+      {
+        label: `Yakınlaştır (${Math.round((mainWindow.webContents.getZoomFactor()) * 100)}%)`,
+        submenu: [
+          { label: 'Büyüt', accelerator: 'Ctrl+=', click: () => { mainWindow.webContents.setZoomFactor(mainWindow.webContents.getZoomFactor() + 0.1); } },
+          { label: 'Küçült', accelerator: 'Ctrl+-', click: () => { mainWindow.webContents.setZoomFactor(Math.max(0.3, mainWindow.webContents.getZoomFactor() - 0.1)); } },
+          { label: 'Sıfırla (100%)', accelerator: 'Ctrl+0', click: () => { mainWindow.webContents.setZoomFactor(1.0); } }
+        ]
+      },
+      { type: 'separator' },
       { label: 'Geri', click: () => mainWindow.webContents.goBack(), enabled: mainWindow.webContents.canGoBack() },
       { label: 'İleri', click: () => mainWindow.webContents.goForward(), enabled: mainWindow.webContents.canGoForward() },
       { label: 'Yenile', click: () => mainWindow.webContents.reload() }
@@ -940,12 +949,24 @@ function createMainWindow(initialUrl = getStartupUrl()) {
       key === 'f12' ||
       ((input.control || input.meta) && input.shift && (key === 'i' || key === 'd'));
 
-    if (!isDevToolsShortcut) {
+    if (isDevToolsShortcut) {
+      event.preventDefault();
+      openOrFocusMainDevTools();
       return;
     }
 
-    event.preventDefault();
-    openOrFocusMainDevTools();
+    if (input.control || input.meta) {
+      if (key === '=' || key === '+') {
+        event.preventDefault();
+        mainWindow.webContents.setZoomFactor(mainWindow.webContents.getZoomFactor() + 0.1);
+      } else if (key === '-') {
+        event.preventDefault();
+        mainWindow.webContents.setZoomFactor(Math.max(0.3, mainWindow.webContents.getZoomFactor() - 0.1));
+      } else if (key === '0') {
+        event.preventDefault();
+        mainWindow.webContents.setZoomFactor(1.0);
+      }
+    }
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
