@@ -1014,11 +1014,14 @@ function createMainWindow(initialUrl = getStartupUrl()) {
     mainWindow = null;
   });
 
-  if (shouldShowOnboarding) {
-    loadDesktopOnboardingPage();
-  } else {
-    mainWindow.loadURL(lastLoadedUrl);
-  }
+  // Clear HTTP cache on startup so web deploy changes are always picked up
+  mainWindow.webContents.session.clearCache().catch(() => {}).then(() => {
+    if (shouldShowOnboarding) {
+      loadDesktopOnboardingPage();
+    } else {
+      mainWindow.loadURL(lastLoadedUrl);
+    }
+  });
 }
 
 function configureAutoStart() {
