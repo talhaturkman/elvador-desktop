@@ -33,32 +33,53 @@ jobs:
 
       - run: npm ci --prefer-offline --no-audit --no-fund
 
-      - name: Build unpacked app
-        run: npx electron-builder --win --dir --publish never
+      # ── x64 build ──
+      - name: Build unpacked app (x64)
+        run: npx electron-builder --win --x64 --dir --publish never
 
-      - name: Write updater metadata
-        run: node scripts/write-app-update-yml.js
+      - name: Write updater metadata (x64)
+        run: node scripts/write-app-update-yml.js win-unpacked
 
-      - name: Verify updater metadata
+      - name: Verify updater metadata (x64)
         shell: pwsh
         run: |
           $path = "release/win-unpacked/resources/app-update.yml"
-          if (!(Test-Path $path)) {
-            throw "Missing $path"
-          }
+          if (!(Test-Path $path)) { throw "Missing $path" }
           Get-Content $path
 
-      - name: Embed icon into exe
-        run: node scripts/post-build-icon.js
+      - name: Embed icon into exe (x64)
+        run: node scripts/post-build-icon.js win-unpacked
 
-      - name: Build installer with patched exe
-        run: npx electron-builder --win nsis --prepackaged release/win-unpacked --publish never
+      - name: Build installer (x64)
+        run: npx electron-builder --win nsis --x64 --prepackaged release/win-unpacked --publish never
 
+      # ── ia32 build ──
+      - name: Build unpacked app (ia32)
+        run: npx electron-builder --win --ia32 --dir --publish never
+
+      - name: Write updater metadata (ia32)
+        run: node scripts/write-app-update-yml.js win-ia32-unpacked
+
+      - name: Verify updater metadata (ia32)
+        shell: pwsh
+        run: |
+          $path = "release/win-ia32-unpacked/resources/app-update.yml"
+          if (!(Test-Path $path)) { throw "Missing $path" }
+          Get-Content $path
+
+      - name: Embed icon into exe (ia32)
+        run: node scripts/post-build-icon.js win-ia32-unpacked
+
+      - name: Build installer (ia32)
+        run: npx electron-builder --win nsis --ia32 --prepackaged release/win-ia32-unpacked --publish never
+
+      # ── Upload release artifacts ──
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             release/*.exe
             release/*.blockmap
             release/latest.yml
+            release/latest-ia32.yml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

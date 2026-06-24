@@ -13,6 +13,15 @@ const CATEGORY_COPY = {
   conversation: { title: 'Sohbet Bildirimi', label: 'sohbet bildirimi', sourceLabel: 'Sohbet', sourceInitials: 'SH' }
 };
 
+function coerceTimestampMs(value) {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function buildSourceUrl(brand, tab) {
   const brandPart = String(brand || '').trim();
   const tabPart = String(tab || '').trim();
@@ -34,7 +43,7 @@ function createDesktopPendingPoller({
   let stopped = true;
   let hasCompletedInitialPoll = false;
   let previousCounts = new Map();
-  let lastNotificationAtBySource = new Map();
+  let lastReminderNotificationAt = 0;
   let lastError = null;
   let lastPollAt = null;
   let lastTotalPending = 0;
@@ -87,6 +96,57 @@ function createDesktopPendingPoller({
     };
   }
 
+  function makeSummaryNotification(sources, totalPending, totalBrand) {
+    const brandPart = totalBrand || brand;
+    const visibleSources = sources
+      .map((source) => ({
+        ...source,
+        count: Math.max(0, Number(source.count) || 0)
+      }))
+      .filter((source) => source.count > 0);
+    const firstSource = visibleSources[0] || null;
+    const firstCopy = firstSource ? (CATEGORY_COPY[firstSource.category] || CATEGORY_COPY.liveSupport) : null;
+    const oldestTimestampMs = visibleSources.reduce((oldest, source) => {
+      const timestampMs = coerceTimestampMs(source.oldestRequestedAt);
+      if (!timestampMs) {
+        return oldest;
+      }
+      return oldest === null || timestampMs < oldest ? timestampMs : oldest;
+    }, null);
+    const sourceSummary = visibleSources
+      .slice(0, 3)
+      .map((source) => {
+        const copy = CATEGORY_COPY[source.category] || CATEGORY_COPY.liveSupport;
+        return `${source.count} ${copy.sourceLabel}`;
+      })
+      .join(' / ');
+
+    return {
+      id: `pending-summary:${brandPart || 'default'}`,
+      category: firstSource?.category || 'panel-visual-notification',
+      sourceLabel: visibleSources.length === 1 && firstCopy ? firstCopy.sourceLabel : 'Panel',
+      sourceInitials: visibleSources.length === 1 && firstCopy ? firstCopy.sourceInitials : String(totalPending),
+      count: totalPending,
+      oldestRequestedAt: oldestTimestampMs ? new Date(oldestTimestampMs).toISOString() : null,
+      title: visibleSources.length === 1 && firstCopy ? firstCopy.title : 'Bekleyen Talepler',
+      body: sourceSummary || `${totalPending} bekleyen talep`,
+      url: buildSourceUrl(brandPart, visibleSources.length === 1 ? firstSource?.tab : ''),
+      persist: true
+    };
+  }
+
+  function showPendingNotification(sources, totalPending, totalBrand) {
+    const visibleSources = sources.filter((source) => Math.max(0, Number(source.count) || 0) > 0);
+    if (visibleSources.length === 0 || totalPending <= 0) {
+      return null;
+    }
+
+    const notification = visibleSources.length === 1
+      ? makeNotification(visibleSources[0], totalBrand)
+      : makeSummaryNotification(visibleSources, totalPending, totalBrand);
+    return showNotification(notification);
+  }
+
   async function poll() {
     if (inFlight || stopped || !authToken) {
       scheduleNext();
@@ -116,28 +176,30 @@ function createDesktopPendingPoller({
       const sources = Array.isArray(payload.sources) ? payload.sources : [];
       const nextCounts = new Map();
       const now = Date.now();
+      let hasNotificationTrigger = false;
       let totalPending = 0;
 
       sources.forEach((source) => {
         const sourceKey = source.key || `${source.category}:${source.tab}`;
         const nextCount = Math.max(0, Number(source.count) || 0);
         const previousCount = previousCounts.get(sourceKey) || 0;
-        const lastNotificationAt = lastNotificationAtBySource.get(sourceKey) || 0;
-        const reminderDue = now - lastNotificationAt >= reminderIntervalMs;
         nextCounts.set(sourceKey, nextCount);
         totalPending += nextCount;
 
-        if (nextCount > 0 && (!hasCompletedInitialPoll || nextCount > previousCount || reminderDue)) {
-          const result = showNotification(makeNotification({ ...source, key: sourceKey, count: nextCount }, payload.brand || brand));
-          if (!result || result.shown !== false) {
-            lastNotificationAtBySource.set(sourceKey, now);
-          }
+        if (nextCount > 0 && (!hasCompletedInitialPoll || nextCount > previousCount)) {
+          hasNotificationTrigger = true;
         }
       });
 
-      for (const sourceKey of lastNotificationAtBySource.keys()) {
-        if (!nextCounts.has(sourceKey)) {
-          lastNotificationAtBySource.delete(sourceKey);
+      const reminderDue = totalPending > 0 && now - lastReminderNotificationAt >= reminderIntervalMs;
+      if (hasNotificationTrigger || reminderDue) {
+        const result = showPendingNotification(
+          sources,
+          totalPending,
+          payload.brand || brand
+        );
+        if (!result || result.shown !== false) {
+          lastReminderNotificationAt = now;
         }
       }
 
@@ -152,7 +214,7 @@ function createDesktopPendingPoller({
       if (lastError.startsWith('auth_')) {
         authToken = null;
         previousCounts = new Map();
-        lastNotificationAtBySource = new Map();
+        lastReminderNotificationAt = 0;
         lastTotalPending = 0;
         hasCompletedInitialPoll = false;
       }
@@ -177,7 +239,7 @@ function createDesktopPendingPoller({
 
     if (tokenChanged) {
       previousCounts = new Map();
-      lastNotificationAtBySource = new Map();
+      lastReminderNotificationAt = 0;
       lastTotalPending = 0;
       hasCompletedInitialPoll = false;
     }
@@ -189,7 +251,7 @@ function createDesktopPendingPoller({
     stopped = true;
     authToken = null;
     previousCounts = new Map();
-    lastNotificationAtBySource = new Map();
+    lastReminderNotificationAt = 0;
     lastTotalPending = 0;
     hasCompletedInitialPoll = false;
     clearTimer();

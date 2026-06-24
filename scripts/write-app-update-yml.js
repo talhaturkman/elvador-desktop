@@ -3,7 +3,6 @@ const path = require('path');
 
 const repoRoot = path.resolve(__dirname, '..');
 const packageJsonPath = path.join(repoRoot, 'package.json');
-const outputPath = path.join(repoRoot, 'release', 'win-unpacked', 'resources', 'app-update.yml');
 
 function getPublishConfig(packageJson) {
   const publish = packageJson?.build?.publish;
@@ -15,6 +14,9 @@ function getPublishConfig(packageJson) {
 }
 
 function main() {
+  const dir = process.argv[2] || 'win-unpacked';
+  const outputPath = path.join(repoRoot, 'release', dir, 'resources', 'app-update.yml');
+
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
   const publish = getPublishConfig(packageJson);
 
