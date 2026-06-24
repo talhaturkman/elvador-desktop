@@ -53,6 +53,10 @@ jobs:
       - name: Build installer (x64)
         run: npx electron-builder --win nsis --x64 --prepackaged release/win-unpacked --publish never
 
+      - name: Save x64 latest.yml
+        shell: pwsh
+        run: Copy-Item release/latest.yml release/latest-x64-backup.yml
+
       # ── ia32 build ──
       - name: Build unpacked app (ia32)
         run: npx electron-builder --win --ia32 --dir --publish never
@@ -72,6 +76,12 @@ jobs:
 
       - name: Build installer (ia32)
         run: npx electron-builder --win nsis --ia32 --prepackaged release/win-ia32-unpacked --publish never
+
+      - name: Separate updater manifests per arch
+        shell: pwsh
+        run: |
+          Rename-Item release/latest.yml release/latest-ia32.yml
+          Rename-Item release/latest-x64-backup.yml release/latest.yml
 
       # ── Upload release artifacts ──
       - uses: softprops/action-gh-release@v2
