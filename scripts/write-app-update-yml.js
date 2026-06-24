@@ -15,6 +15,7 @@ function getPublishConfig(packageJson) {
 
 function main() {
   const dir = process.argv[2] || 'win-unpacked';
+  const channel = process.argv[3] || null;
   const outputPath = path.join(repoRoot, 'release', dir, 'resources', 'app-update.yml');
 
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
@@ -24,13 +25,18 @@ function main() {
     throw new Error('package.json build.publish must define github owner and repo');
   }
 
-  const yml = [
+  const lines = [
     `provider: ${publish.provider}`,
     `owner: ${publish.owner}`,
     `repo: ${publish.repo}`,
     `updaterCacheDirName: ${packageJson.name}-updater`,
-    ''
-  ].join('\n');
+  ];
+  if (channel) {
+    lines.push(`channel: ${channel}`);
+  }
+  lines.push('');
+
+  const yml = lines.join('\n');
 
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   fs.writeFileSync(outputPath, yml, 'utf8');

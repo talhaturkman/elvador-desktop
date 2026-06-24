@@ -33,7 +33,7 @@ jobs:
 
       - run: npm ci --prefer-offline --no-audit --no-fund
 
-      # ── x64 build ──
+      # ── x64 build (Electron 42, Windows 10+) ──
       - name: Build unpacked app (x64)
         run: npx electron-builder --win --x64 --dir --publish never
 
@@ -57,12 +57,15 @@ jobs:
         shell: pwsh
         run: Copy-Item release/latest.yml release/latest-x64-backup.yml
 
-      # ── ia32 build ──
+      # ── ia32 build (Electron 22, Windows 7+) ──
+      - name: Downgrade to Electron 22 for ia32
+        run: npm install electron@22.3.27 --save-dev --no-audit --no-fund
+
       - name: Build unpacked app (ia32)
         run: npx electron-builder --win --ia32 --dir --publish never
 
       - name: Write updater metadata (ia32)
-        run: node scripts/write-app-update-yml.js win-ia32-unpacked
+        run: node scripts/write-app-update-yml.js win-ia32-unpacked latest-ia32
 
       - name: Verify updater metadata (ia32)
         shell: pwsh
