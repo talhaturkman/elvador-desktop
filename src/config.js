@@ -1,6 +1,8 @@
 const DEFAULT_ADMIN_URL = 'https://chat.elvador.com/admin';
 const DEFAULT_PROTOCOL = 'elvador';
 const DEFAULT_NOTIFICATION_REMINDER_MS = 300000;
+const DEFAULT_WEB_DEPLOY_CHECK_INTERVAL_MS = 60000;
+const DEFAULT_WEB_DEPLOY_REQUEST_TIMEOUT_MS = 15000;
 
 function normalizeAdminUrl(value) {
   const candidate = String(value || '').trim();
@@ -49,6 +51,14 @@ function getDesktopConfig() {
       process.env.ELVADOR_NOTIFICATION_REMINDER_MS,
       DEFAULT_NOTIFICATION_REMINDER_MS
     ),
+    webDeployCheckIntervalMs: normalizePositiveInteger(
+      process.env.ELVADOR_WEB_DEPLOY_CHECK_INTERVAL_MS,
+      DEFAULT_WEB_DEPLOY_CHECK_INTERVAL_MS
+    ),
+    webDeployRequestTimeoutMs: normalizePositiveInteger(
+      process.env.ELVADOR_WEB_DEPLOY_REQUEST_TIMEOUT_MS,
+      DEFAULT_WEB_DEPLOY_REQUEST_TIMEOUT_MS
+    ),
     protocol: process.env.ELVADOR_PROTOCOL || DEFAULT_PROTOCOL
   };
 }
@@ -57,5 +67,7 @@ module.exports = {
   DEFAULT_ADMIN_URL,
   DEFAULT_NOTIFICATION_REMINDER_MS,
   DEFAULT_PROTOCOL,
+  DEFAULT_WEB_DEPLOY_CHECK_INTERVAL_MS,
+  DEFAULT_WEB_DEPLOY_REQUEST_TIMEOUT_MS,
   getDesktopConfig
 };

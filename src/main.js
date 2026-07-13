@@ -114,6 +114,7 @@ const { getDesktopConfig } = require('./config');
 const { createNativeNotificationService } = require('./nativeNotifications');
 const { createNativeNotificationSoundService } = require('./nativeNotificationSound');
 const { createDesktopPendingPoller } = require('./desktopPendingPoller');
+const { createWebDeployMonitor } = require('./webDeployMonitor');
 
 const config = getDesktopConfig();
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
@@ -127,7 +128,9 @@ let tray = null;
 let notificationService = null;
 let notificationSoundService = null;
 let pendingPoller = null;
+let webDeployMonitor = null;
 let isQuitting = false;
+let webDeployReloadInProgress = false;
 let lastLoadError = null;
 let lastLoadedUrl = config.adminUrl;
 let lastNotificationState = { activeCount: 0, activeIds: [] };
@@ -151,6 +154,149 @@ function writeDesktopLog(message, details = null) {
   } catch (_) {
     // Logging must never break app startup.
   }
+}
+
+function emitWebDeployBrowserLog(event, details = {}) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+
+  const payload = {
+    event,
+    at: new Date().toISOString(),
+    ...details
+  };
+  const script = `(function () {
+    try {
+      const entry = ${JSON.stringify(payload)};
+      const previous = Array.isArray(window.__elvadorWebDeployDiagnostics)
+        ? window.__elvadorWebDeployDiagnostics
+        : [];
+      previous.push(entry);
+      window.__elvadorWebDeployDiagnostics = previous.slice(-40);
+      console.info('[WEB_DEPLOY]', entry);
+    } catch (_) {}
+  })();`;
+
+  mainWindow.webContents.executeJavaScript(script).catch(() => {});
+}
+
+async function reloadPanelForWebDeploy({ previousBuildId, buildId, generatedAt, endpointUrl }) {
+  if (!mainWindow || mainWindow.isDestroyed() || !isWindowOnSameOrigin()) {
+    const result = {
+      reloaded: true,
+      skipped: true,
+      reason: 'panel_not_loaded'
+    };
+    writeDesktopLog('web_deploy_reload_skipped', {
+      ...result,
+      previousBuildId,
+      buildId,
+      endpointUrl
+    });
+    return result;
+  }
+
+  if (webDeployReloadInProgress) {
+    return {
+      reloaded: false,
+      reason: 'reload_already_in_progress'
+    };
+  }
+
+  const webContents = mainWindow.webContents;
+  const reloadTrace = {
+    event: 'reload_requested',
+    at: new Date().toISOString(),
+    previousBuildId,
+    buildId,
+    generatedAt: generatedAt || null,
+    endpointUrl,
+    url: webContents.getURL()
+  };
+  const setReloadTraceScript = `(function () {
+    try {
+      const trace = ${JSON.stringify(reloadTrace)};
+      sessionStorage.setItem('__elvadorDesktopWebDeployReload', JSON.stringify(trace));
+      console.info('[WEB_DEPLOY]', trace);
+    } catch (_) {}
+  })();`;
+
+  webDeployReloadInProgress = true;
+  writeDesktopLog('web_deploy_reload_requested', reloadTrace);
+  emitWebDeployBrowserLog('reload_requested', reloadTrace);
+
+  try {
+    await webContents.executeJavaScript(setReloadTraceScript);
+  } catch (error) {
+    writeDesktopLog('web_deploy_reload_trace_write_failed', {
+      message: error?.message || String(error),
+      buildId
+    });
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let timeout = null;
+
+    const finish = (reloaded, reason, extra = {}) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      webDeployReloadInProgress = false;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      webContents.removeListener('did-finish-load', onFinishLoad);
+      webContents.removeListener('did-fail-load', onFailLoad);
+
+      const result = {
+        reloaded,
+        reason,
+        ...extra
+      };
+      writeDesktopLog('web_deploy_reload_finished', {
+        ...result,
+        previousBuildId,
+        buildId,
+        url: webContents.getURL()
+      });
+      emitWebDeployBrowserLog('reload_finished', {
+        ...result,
+        previousBuildId,
+        buildId
+      });
+      resolve(result);
+    };
+
+    const onFinishLoad = () => {
+      finish(true, 'did_finish_load');
+    };
+    const onFailLoad = (_event, errorCode, errorDescription, validatedUrl, isMainFrame) => {
+      if (isMainFrame && errorCode !== -3) {
+        finish(false, 'did_fail_load', {
+          errorCode,
+          errorDescription,
+          validatedUrl
+        });
+      }
+    };
+
+    webContents.once('did-finish-load', onFinishLoad);
+    webContents.on('did-fail-load', onFailLoad);
+    timeout = setTimeout(() => {
+      finish(false, 'reload_timeout');
+    }, 30000);
+
+    try {
+      webContents.reloadIgnoringCache();
+    } catch (error) {
+      finish(false, 'reload_throw', {
+        message: error?.message || String(error)
+      });
+    }
+  });
 }
 
 function markStartupState(status, details = {}) {
@@ -231,6 +377,8 @@ function buildDiagnosticsReport() {
     notificationState,
     soundState,
     pendingPollerState: pollerState,
+    webDeployMonitorState: webDeployMonitor?.getState() || null,
+    webDeployReloadInProgress,
     developerShortcutState,
     lastDevToolsRequestAt,
     logFilePath,
@@ -1292,10 +1440,19 @@ if (!gotSingleInstanceLock) {
       showNotification: (payload) => notificationService.showNotification(payload),
       onStateChange: () => refreshTrayMenu()
     });
+    webDeployMonitor = createWebDeployMonitor({
+      adminUrl: config.adminUrl,
+      intervalMs: config.webDeployCheckIntervalMs,
+      timeoutMs: config.webDeployRequestTimeoutMs,
+      onDeploymentChanged: reloadPanelForWebDeploy,
+      onStateChange: ({ event, details }) => emitWebDeployBrowserLog(event, details),
+      writeLog: writeDesktopLog
+    });
 
     registerIpcHandlers();
     createMainWindow();
     createTray();
+    webDeployMonitor.start();
     if (process.env.ELVADOR_SHOW_TEST_NOTIFICATION_ON_START === 'true') {
       setTimeout(() => {
         notificationService?.showNotification({
@@ -1395,6 +1552,7 @@ if (!gotSingleInstanceLock) {
       quitAt: new Date().toISOString()
     });
     pendingPoller?.stop();
+    webDeployMonitor?.stop();
     notificationSoundService?.stopNotificationSound('before_quit');
     globalShortcut.unregisterAll();
   });

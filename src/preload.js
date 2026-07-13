@@ -403,6 +403,34 @@ function stopNotificationSoundFromPage(reason = 'page-direct') {
   return ipcRenderer.invoke('elvador:stop-notification-sound', reason);
 }
 
+function reportWebDeployReloadFromSession() {
+  try {
+    const traceText = window.sessionStorage.getItem('__elvadorDesktopWebDeployReload');
+    if (!traceText) {
+      return;
+    }
+
+    window.sessionStorage.removeItem('__elvadorDesktopWebDeployReload');
+    const trace = JSON.parse(traceText);
+    const entry = {
+      ...trace,
+      event: 'renderer_reloaded',
+      rendererLoadedAt: new Date().toISOString(),
+      pageUrl: window.location.href
+    };
+    const previous = Array.isArray(window.__elvadorWebDeployDiagnostics)
+      ? window.__elvadorWebDeployDiagnostics
+      : [];
+    previous.push(entry);
+    window.__elvadorWebDeployDiagnostics = previous.slice(-40);
+    console.info('[WEB_DEPLOY]', entry);
+  } catch (error) {
+    console.warn('[WEB_DEPLOY] renderer_reload_trace_failed', {
+      message: error?.message || String(error)
+    });
+  }
+}
+
 contextBridge.exposeInMainWorld('elvadorDesktop', {
   isDesktopShell: true,
   platform: process.platform,
@@ -416,6 +444,7 @@ contextBridge.exposeInMainWorld('elvadorDesktop', {
 });
 
 window.addEventListener('DOMContentLoaded', () => {
+  reportWebDeployReloadFromSession();
   syncStoredAdminSession();
   window.setInterval(syncStoredAdminSession, 4000);
   startPanelVisualNotificationObserver();
