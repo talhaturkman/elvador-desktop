@@ -12,6 +12,14 @@ let lastDirectNativeNotificationAt = 0;
 let panelNotificationObserver = null;
 let panelNotificationEvaluateTimer = null;
 
+function traceDesktopNotification(event, details = {}) {
+  console.info('[DESKTOP_NOTIFICATION_TRACE]', {
+    event,
+    at: new Date().toISOString(),
+    ...details
+  });
+}
+
 function readStorageValue(storage, key) {
   try {
     return storage?.getItem(key) || null;
@@ -315,11 +323,23 @@ function shouldNotifyPanelVisualNotification(payload) {
 
   if (suppressedByDirectBridge) {
     lastPanelNotificationAt = now;
+    traceDesktopNotification('panel_fallback_suppressed', {
+      reason: 'recent_page_direct_notification',
+      id: payload.id,
+      category: payload.category,
+      count: payload.count
+    });
     return false;
   }
 
   if (firstSeen || countIncreased || reminderDue || meaningfulTextChanged) {
     lastPanelNotificationAt = now;
+    traceDesktopNotification('panel_fallback_triggered', {
+      id: payload.id,
+      category: payload.category,
+      count: payload.count,
+      reason: firstSeen ? 'first_seen' : countIncreased ? 'count_increased' : reminderDue ? 'reminder_due' : 'meaningful_text_changed'
+    });
     return true;
   }
 
@@ -330,6 +350,9 @@ function evaluatePanelVisualNotification() {
   panelNotificationEvaluateTimer = null;
   const payload = getPanelVisualNotificationPayload();
   if (!payload) {
+    if (lastPanelNotificationCount > 0) {
+      traceDesktopNotification('panel_pending_cleared', { previousCount: lastPanelNotificationCount });
+    }
     lastPanelNotificationCount = 0;
     lastPanelNotificationSignature = '';
     return;
@@ -343,6 +366,13 @@ function evaluatePanelVisualNotification() {
     ...payload,
     bridgeSource: 'panel-fallback',
     playSound: true
+  }).then((result) => {
+    traceDesktopNotification('panel_fallback_result', {
+      id: payload.id,
+      category: payload.category,
+      count: payload.count,
+      result
+    });
   });
 }
 
@@ -382,14 +412,29 @@ function startPanelVisualNotificationObserver() {
 
 function showNativeNotificationFromPage(payload = {}) {
   lastDirectNativeNotificationAt = Date.now();
+  const enrichedPayload = enrichNotificationPayloadFromPanel({
+    ...payload,
+    bridgeSource: 'page-direct',
+    playSound: payload.playSound === true
+  });
+  traceDesktopNotification('page_direct_requested', {
+    id: enrichedPayload.id,
+    category: enrichedPayload.category,
+    count: enrichedPayload.count,
+    acknowledgementKey: enrichedPayload.acknowledgementKey || null
+  });
   return ipcRenderer.invoke(
     'elvador:show-native-notification',
-    enrichNotificationPayloadFromPanel({
-      ...payload,
-      bridgeSource: 'page-direct',
-      playSound: payload.playSound === true
-    })
-  );
+    enrichedPayload
+  ).then((result) => {
+    traceDesktopNotification('page_direct_result', {
+      id: enrichedPayload.id,
+      category: enrichedPayload.category,
+      count: enrichedPayload.count,
+      result
+    });
+    return result;
+  });
 }
 
 function playNotificationSoundFromPage(options = {}) {
@@ -449,4 +494,8 @@ window.addEventListener('DOMContentLoaded', () => {
   window.setInterval(syncStoredAdminSession, 4000);
   startPanelVisualNotificationObserver();
   window.dispatchEvent(new CustomEvent('elvador-desktop-ready'));
+});
+
+ipcRenderer.on('elvador:notification-opened', (_event, payload = {}) => {
+  traceDesktopNotification('native_notification_opened', payload);
 });

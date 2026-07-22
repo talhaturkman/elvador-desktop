@@ -1429,6 +1429,9 @@ if (!gotSingleInstanceLock) {
       playSound: (options) => notificationSoundService.playNotificationSound(options),
       stopSound: (reason) => notificationSoundService.stopNotificationSound(reason),
       writeLog: writeDesktopLog,
+      onNotificationOpened: (payload) => {
+        mainWindow?.webContents?.send('elvador:notification-opened', payload);
+      },
       onChange: (state) => {
         lastNotificationState = state;
         refreshTrayMenu();
@@ -1438,6 +1441,8 @@ if (!gotSingleInstanceLock) {
       apiBaseUrl: config.apiBaseUrl,
       reminderIntervalMs: config.notificationReminderMs,
       showNotification: (payload) => notificationService.showNotification(payload),
+      dismissNotification: (payload) => notificationService.dismissNotification(payload),
+      writeLog: writeDesktopLog,
       onStateChange: () => refreshTrayMenu()
     });
     webDeployMonitor = createWebDeployMonitor({

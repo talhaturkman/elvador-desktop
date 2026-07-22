@@ -34,6 +34,8 @@ function createDesktopPendingPoller({
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   reminderIntervalMs = DEFAULT_REMINDER_INTERVAL_MS,
   showNotification,
+  dismissNotification = () => {},
+  writeLog = () => {},
   onStateChange = () => {}
 }) {
   let authToken = null;
@@ -43,6 +45,7 @@ function createDesktopPendingPoller({
   let stopped = true;
   let hasCompletedInitialPoll = false;
   let previousCounts = new Map();
+  let previousSources = new Map();
   let lastReminderNotificationAt = 0;
   let lastError = null;
   let lastPollAt = null;
@@ -82,6 +85,7 @@ function createDesktopPendingPoller({
 
   function makeNotification(source, totalBrand) {
     const copy = CATEGORY_COPY[source.category] || CATEGORY_COPY.liveSupport;
+    const oldestItem = source.items?.[0] || null;
     return {
       id: source.key || `${source.category}:${totalBrand || 'default'}`,
       category: source.category,
@@ -89,6 +93,8 @@ function createDesktopPendingPoller({
       sourceInitials: copy.sourceInitials,
       count: source.count,
       oldestRequestedAt: source.oldestRequestedAt,
+      roomNumber: oldestItem?.roomNumber || null,
+      acknowledgementKey: `${source.key || `${source.category}:${source.tab}`}:${source.count}`,
       title: copy.title,
       body: `${source.count} bekleyen ${copy.label}`,
       url: buildSourceUrl(totalBrand, source.tab),
@@ -113,6 +119,20 @@ function createDesktopPendingPoller({
       }
       return oldest === null || timestampMs < oldest ? timestampMs : oldest;
     }, null);
+
+    let oldestItem = null;
+    let minTimestamp = null;
+    visibleSources.forEach((src) => {
+      const item = src.items?.[0];
+      if (item && item.requestedAt) {
+        const ts = Date.parse(item.requestedAt);
+        if (minTimestamp === null || ts < minTimestamp) {
+          minTimestamp = ts;
+          oldestItem = item;
+        }
+      }
+    });
+
     const sourceSummary = visibleSources
       .slice(0, 3)
       .map((source) => {
@@ -128,6 +148,7 @@ function createDesktopPendingPoller({
       sourceInitials: visibleSources.length === 1 && firstCopy ? firstCopy.sourceInitials : String(totalPending),
       count: totalPending,
       oldestRequestedAt: oldestTimestampMs ? new Date(oldestTimestampMs).toISOString() : null,
+      roomNumber: oldestItem?.roomNumber || null,
       title: visibleSources.length === 1 && firstCopy ? firstCopy.title : 'Bekleyen Talepler',
       body: sourceSummary || `${totalPending} bekleyen talep`,
       url: buildSourceUrl(brandPart, visibleSources.length === 1 ? firstSource?.tab : ''),
@@ -175,6 +196,7 @@ function createDesktopPendingPoller({
       const payload = await response.json();
       const sources = Array.isArray(payload.sources) ? payload.sources : [];
       const nextCounts = new Map();
+      const nextSources = new Map();
       const now = Date.now();
       let hasNotificationTrigger = false;
       let totalPending = 0;
@@ -184,12 +206,21 @@ function createDesktopPendingPoller({
         const nextCount = Math.max(0, Number(source.count) || 0);
         const previousCount = previousCounts.get(sourceKey) || 0;
         nextCounts.set(sourceKey, nextCount);
+        nextSources.set(sourceKey, { category: source.category, count: nextCount });
         totalPending += nextCount;
 
         if (nextCount > 0 && (!hasCompletedInitialPoll || nextCount > previousCount)) {
           hasNotificationTrigger = true;
         }
       });
+
+      for (const [sourceKey, previousSource] of previousSources.entries()) {
+        const nextSource = nextSources.get(sourceKey);
+        if (!nextSource || nextSource.count <= 0) {
+          dismissNotification({ id: sourceKey, category: previousSource.category });
+          writeLog('pending notification resolved', { sourceKey, category: previousSource.category, previousCount: previousSource.count });
+        }
+      }
 
       const reminderDue = totalPending > 0 && now - lastReminderNotificationAt >= reminderIntervalMs;
       if (hasNotificationTrigger || reminderDue) {
@@ -203,7 +234,14 @@ function createDesktopPendingPoller({
         }
       }
 
+      writeLog('pending poll', {
+        totalPending,
+        trigger: hasNotificationTrigger ? 'increase_or_initial' : reminderDue ? 'reminder' : 'none',
+        sources: sources.map((source) => ({ key: source.key || `${source.category}:${source.tab}`, category: source.category, count: Number(source.count) || 0 }))
+      });
+
       previousCounts = nextCounts;
+      previousSources = nextSources;
       brand = payload.brand || brand;
       lastPollAt = new Date().toISOString();
       lastTotalPending = totalPending;
@@ -214,6 +252,7 @@ function createDesktopPendingPoller({
       if (lastError.startsWith('auth_')) {
         authToken = null;
         previousCounts = new Map();
+        previousSources = new Map();
         lastReminderNotificationAt = 0;
         lastTotalPending = 0;
         hasCompletedInitialPoll = false;
@@ -239,6 +278,7 @@ function createDesktopPendingPoller({
 
     if (tokenChanged) {
       previousCounts = new Map();
+      previousSources = new Map();
       lastReminderNotificationAt = 0;
       lastTotalPending = 0;
       hasCompletedInitialPoll = false;
@@ -251,6 +291,7 @@ function createDesktopPendingPoller({
     stopped = true;
     authToken = null;
     previousCounts = new Map();
+    previousSources = new Map();
     lastReminderNotificationAt = 0;
     lastTotalPending = 0;
     hasCompletedInitialPoll = false;

@@ -1,11 +1,10 @@
 const { BrowserWindow, ipcMain, screen } = require('electron');
 
-const OVERLAY_WIDTH = 280;
-const OVERLAY_HEIGHT = 56;
+const OVERLAY_WIDTH = 340;
+const OVERLAY_HEIGHT = 104;
 const OVERLAY_MARGIN = 16;
 const OVERLAY_GAP = 10;
 const OVERLAY_CHANNEL_OPEN = 'elvador:overlay-notification-open';
-const OPENED_NOTIFICATION_SILENCE_MS = 90000;
 const ACTIVE_DUPLICATE_SUPPRESS_MS = 45000;
 const DEFAULT_NOTIFICATION_SOUND_OPTIONS = Object.freeze({
   profile: 'critical',
@@ -22,6 +21,7 @@ const CATEGORY_UI = Object.freeze({
   housekeeping: { label: 'Kat hizmetleri', initials: 'HK', accent: '#0f766e' },
   technic: { label: 'Teknik', initials: 'TK', accent: '#ea580c' },
   orders: { label: 'Sipariş', initials: 'SP', accent: '#d97706' },
+  ordersReservations: { label: 'Masa Rezervasyonu', initials: 'MR', accent: '#d97706' },
   upsell: { label: 'Upsell', initials: 'UP', accent: '#059669' },
   spa: { label: 'Spa', initials: 'SP', accent: '#db2777' },
   lostAndFound: { label: 'Kayıp eşya', initials: 'KE', accent: '#475569' },
@@ -45,6 +45,8 @@ const CATEGORY_ALIASES = Object.freeze({
   technical: 'technic',
   orders: 'orders',
   order: 'orders',
+  ordersreservations: 'ordersReservations',
+  orders_reservations: 'ordersReservations',
   upsell: 'upsell',
   spa: 'spa',
   lostandfound: 'lostAndFound',
@@ -162,6 +164,10 @@ function buildStableNotificationSignature(notification) {
 }
 
 function buildOpenedNotificationFingerprint(notification) {
+  const acknowledgementKey = normalizeText(notification.acknowledgementKey);
+  if (acknowledgementKey) {
+    return `ack:${acknowledgementKey}`;
+  }
   if (!notification.count) {
     return '';
   }
@@ -184,6 +190,25 @@ function buildActiveNotificationFingerprint(notification) {
   ].join('|');
 }
 
+function estimateOldestRequestedAt(ageLabel) {
+  if (!ageLabel) return null;
+  const clean = ageLabel.toLowerCase().replace(/açık/g, '').trim();
+  let minsAgo = 0;
+
+  const hrMatch = clean.match(/(\d+)\s*sa/);
+  const minMatch = clean.match(/(\d+)\s*dk/);
+  const secMatch = clean.match(/(\d+)\s*sn/);
+
+  if (hrMatch) minsAgo += parseInt(hrMatch[1], 10) * 60;
+  if (minMatch) minsAgo += parseInt(minMatch[1], 10);
+  if (secMatch) minsAgo += parseInt(secMatch[1], 10) / 60;
+
+  if (minsAgo > 0) {
+    return new Date(Date.now() - minsAgo * 60 * 1000).toISOString();
+  }
+  return null;
+}
+
 function sanitizeNotificationPayload(payload = {}) {
   const category = normalizeCategory(payload.category);
   const categoryUi = CATEGORY_UI[category] || CATEGORY_UI.default;
@@ -203,6 +228,9 @@ function sanitizeNotificationPayload(payload = {}) {
   const ageLabel = normalizeText(payload.ageLabel)
     || formatOpenAge(payload.oldestRequestedAt || payload.requestedAt || payload.createdAt);
 
+  const oldestRequestedAt = payload.oldestRequestedAt || payload.requestedAt || payload.createdAt || estimateOldestRequestedAt(ageLabel) || null;
+  const roomNumber = normalizeText(payload.roomNumber || '');
+
   return {
     id,
     title,
@@ -214,6 +242,9 @@ function sanitizeNotificationPayload(payload = {}) {
     accentColor: sanitizeColor(payload.accentColor, categoryUi.accent),
     count,
     ageLabel,
+    roomNumber,
+    oldestRequestedAt,
+    acknowledgementKey: normalizeText(payload.acknowledgementKey),
     persist: payload.persist !== false,
     playSound: payload.playSound !== false && payload.silent !== true
   };
@@ -244,16 +275,40 @@ function escapeHtml(value) {
 function buildOverlayHtml(notification) {
   const id = escapeHtml(notification.id);
   const title = escapeHtml(notification.title);
-  const countText = notification.count ? escapeHtml(String(notification.count)) : '';
-  const ageText = escapeHtml(notification.ageLabel || '');
-  const iconSrc = notification._iconDataUrl || '';
+  const count = notification.count || 0;
+
+  let cleanTitleType = title.replace(/bildirimi/i, '').replace(/talepleri/i, '').replace(/talebi/i, '').trim();
+  if (cleanTitleType.toLowerCase().includes('destek')) {
+    cleanTitleType = 'DESTEK';
+  } else if (cleanTitleType.toLowerCase().includes('sohbet')) {
+    cleanTitleType = 'SOHBET';
+  } else if (cleanTitleType.toLowerCase().includes('rezervasyon')) {
+    cleanTitleType = 'REZERVASYON';
+  } else if (cleanTitleType.toLowerCase().includes('kat hizmetleri') || cleanTitleType.toLowerCase().includes('temizlik')) {
+    cleanTitleType = 'KAT HİZMETLERİ';
+  } else if (cleanTitleType.toLowerCase().includes('teknik')) {
+    cleanTitleType = 'TEKNİK';
+  } else if (cleanTitleType.toLowerCase().includes('sipariş') || cleanTitleType.toLowerCase().includes('yemek')) {
+    cleanTitleType = 'SİPARİŞ';
+  } else if (cleanTitleType.toLowerCase().includes('upsell')) {
+    cleanTitleType = 'UPSELL';
+  } else if (cleanTitleType.toLowerCase().includes('spa')) {
+    cleanTitleType = 'SPA';
+  } else if (cleanTitleType.toLowerCase().includes('kayıp')) {
+    cleanTitleType = 'KAYIP EŞYA';
+  }
+
+  const displayTitle = `BEKLEYEN ${cleanTitleType.toUpperCase()}(${count})`;
+  const roomLabel = (notification.category === 'orders' || cleanTitleType.toLowerCase().includes('sipariş')) ? 'MASA' : 'ODA';
+  const roomValue = notification.roomNumber ? escapeHtml(notification.roomNumber) : 'GENEL';
+  const oldestTimeEpoch = notification.oldestRequestedAt ? Date.parse(notification.oldestRequestedAt) : Date.now();
 
   return `
 <!doctype html>
 <html>
   <head>
     <meta charset="utf-8">
-    <title>${title}</title>
+    <title>${displayTitle}</title>
     <style>
       * { box-sizing: border-box; }
       html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
@@ -262,20 +317,81 @@ function buildOverlayHtml(notification) {
         width: 100vw;
         height: 100vh;
         display: flex;
-        align-items: center;
-        gap: 10px;
-        padding: 0 14px;
-        border-radius: 10px;
-        background: #1a1a1a;
-        border: 2px solid rgba(255,255,255,.22);
-        box-shadow: 0 8px 24px rgba(0,0,0,.5);
+        flex-direction: column;
+        justify-content: center;
+        gap: 8px;
+        padding: 10px 16px;
+        border-radius: 12px;
+        background: rgba(220, 38, 38, 0.85);
+        border: 2px solid rgba(248, 113, 113, 0.4);
+        box-shadow: 0 8px 24px rgba(0,0,0,.45);
         cursor: pointer;
         animation: enter .16s ease-out;
       }
-      .logo { width: 36px; height: 36px; flex-shrink: 0; object-fit: contain; }
-      .title { flex: 1; min-width: 0; font-size: 13px; font-weight: 700; color: #f1f1f1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .badge { flex-shrink: 0; min-width: 22px; height: 22px; padding: 0 6px; border-radius: 999px; background: #ef4444; color: #fff; font-size: 12px; font-weight: 800; display: grid; place-items: center; }
-      .age { flex-shrink: 0; font-size: 11px; color: #9ca3af; font-weight: 600; }
+      .row {
+        display: flex;
+        align-items: center;
+        width: 100%;
+        gap: 8px;
+        line-height: 1.2;
+      }
+      .bell-container {
+        position: relative;
+        width: 24px;
+        height: 24px;
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .bell-badge {
+        position: absolute;
+        top: -1px;
+        right: -1px;
+        background: #ef4444;
+        color: #fff;
+        font-size: 8px;
+        font-weight: 800;
+        width: 11px;
+        height: 11px;
+        border-radius: 50%;
+        display: grid;
+        place-items: center;
+        border: 1px solid #fff;
+      }
+      .title {
+        font-size: 13.5px;
+        font-weight: 800;
+        color: #ffffff;
+        letter-spacing: 0.03em;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        flex: 1;
+      }
+      .row-icon-container {
+        width: 24px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        flex-shrink: 0;
+      }
+      .text-label {
+        font-size: 12px;
+        font-weight: 700;
+        color: #ffffff;
+        letter-spacing: 0.02em;
+      }
+      .text-value {
+        font-size: 12px;
+        font-weight: 700;
+        color: #ffffff;
+      }
+      .text-value-red {
+        font-size: 12px;
+        font-weight: 800;
+        color: #ff3b30;
+      }
       @keyframes enter {
         from { opacity: 0; transform: translateY(6px) scale(.97); }
         to { opacity: 1; transform: translateY(0) scale(1); }
@@ -284,10 +400,35 @@ function buildOverlayHtml(notification) {
   </head>
   <body>
     <main class="n" role="button" tabindex="0" data-id="${id}">
-      <img class="logo" src="${iconSrc}" alt="E" />
-      <span class="title">${title}</span>
-      ${countText ? `<span class="badge">${countText}</span>` : ''}
-      ${ageText ? `<span class="age">${ageText}</span>` : ''}
+      <div class="row">
+        <div class="bell-container">
+          <svg viewBox="0 0 24 24" fill="#ef4444" width="18" height="18">
+            <path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 4.36 6 6.92 6 10v5l-2 2v1h16v-1l-2-2z"/>
+          </svg>
+          <span class="bell-badge">1</span>
+        </div>
+        <span class="title">${displayTitle}</span>
+      </div>
+      <div class="row">
+        <div class="row-icon-container">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="width: 15px; height: 15px;">
+            <line x1="3" y1="10" x2="21" y2="10" />
+            <line x1="12" y1="10" x2="12" y2="20" />
+            <line x1="8" y1="20" x2="16" y2="20" />
+            <path d="M6 10c0-3 1.5-5 6-5s6 2 6 5" />
+          </svg>
+        </div>
+        <span class="text-label">${roomLabel}: <span class="text-value">${roomValue}</span></span>
+      </div>
+      <div class="row">
+        <div class="row-icon-container">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="width: 15px; height: 15px;">
+            <circle cx="12" cy="12" r="10" />
+            <polyline points="12 6 12 12 16 14" />
+          </svg>
+        </div>
+        <span class="text-label">SAAT: <span class="text-value-red" id="time-elapsed">YÜKLENİYOR...</span> ÖNCE</span>
+      </div>
     </main>
     <script>
       const open = () => window.elvadorOverlay.open("${id}");
@@ -295,6 +436,28 @@ function buildOverlayHtml(notification) {
       document.body.addEventListener('keydown', (event) => {
         if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); }
       });
+
+      const oldestTime = ${oldestTimeEpoch};
+      const updateTime = () => {
+        const elapsedMs = Date.now() - oldestTime;
+        const elapsedSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
+        
+        const hours = Math.floor(elapsedSeconds / 3600);
+        const minutes = Math.floor((elapsedSeconds % 3600) / 60);
+        const seconds = elapsedSeconds % 60;
+        
+        let timeStr = '';
+        if (hours > 0) {
+          const totalMinutes = hours * 60 + minutes;
+          timeStr += totalMinutes + ' DAKİKA ' + seconds + ' SANİYE';
+        } else {
+          timeStr += minutes + ' DAKİKA ' + seconds + ' SANİYE';
+        }
+        
+        document.getElementById('time-elapsed').innerText = timeStr;
+      };
+      updateTime();
+      setInterval(updateTime, 1000);
     </script>
   </body>
 </html>`;
@@ -310,6 +473,7 @@ function createNativeNotificationService({
   playSound = () => ({ played: false, reason: 'sound_service_unavailable' }),
   stopSound = () => {},
   writeLog = () => {},
+  onNotificationOpened = () => {},
   onChange = () => {}
 }) {
   const activeNotifications = new Map();
@@ -324,29 +488,26 @@ function createNativeNotificationService({
   }
 
   function pruneRecentlyOpenedNotifications() {
-    const now = Date.now();
     for (const [notificationId, record] of recentlyOpenedNotifications.entries()) {
-      if (!record || record.expiresAt <= now) {
+      if (!record) {
         recentlyOpenedNotifications.delete(notificationId);
       }
     }
     for (const [fingerprint, record] of recentlyOpenedFingerprints.entries()) {
-      if (!record || record.expiresAt <= now) {
+      if (!record) {
         recentlyOpenedFingerprints.delete(fingerprint);
       }
     }
   }
 
   function rememberOpenedNotification(payload) {
-    const expiresAt = Date.now() + OPENED_NOTIFICATION_SILENCE_MS;
     recentlyOpenedNotifications.set(payload.id, {
-      signature: buildStableNotificationSignature(payload),
-      expiresAt
+      signature: buildStableNotificationSignature(payload)
     });
 
     const fingerprint = buildOpenedNotificationFingerprint(payload);
     if (fingerprint) {
-      recentlyOpenedFingerprints.set(fingerprint, { expiresAt });
+      recentlyOpenedFingerprints.set(fingerprint, { id: payload.id, category: payload.category });
     }
   }
 
@@ -425,6 +586,18 @@ function createNativeNotificationService({
     rememberOpenedNotification(record.payload);
     closeRecord(record);
     stopSound('notification_open');
+    writeLog('notification acknowledged by open', {
+      id: record.payload.id,
+      category: record.payload.category,
+      count: record.payload.count,
+      acknowledgementKey: record.payload.acknowledgementKey || null
+    });
+    onNotificationOpened({
+      id: record.payload.id,
+      category: record.payload.category,
+      count: record.payload.count,
+      acknowledgementKey: record.payload.acknowledgementKey || null
+    });
     emitChange();
     repositionOverlays();
     focusApp();
@@ -584,8 +757,28 @@ function createNativeNotificationService({
     };
   }
 
+  function dismissNotification({ id, category } = {}) {
+    const notificationId = normalizeText(id);
+    const normalizedCategory = normalizeCategory(category);
+    const record = activeNotifications.get(notificationId);
+    if (record) {
+      activeNotifications.delete(notificationId);
+      closeRecord(record);
+    }
+    recentlyOpenedNotifications.delete(notificationId);
+    for (const [fingerprint, opened] of recentlyOpenedFingerprints.entries()) {
+      if (opened?.id === notificationId || (normalizedCategory && opened?.category === normalizedCategory)) {
+        recentlyOpenedFingerprints.delete(fingerprint);
+      }
+    }
+    writeLog('notification dismissed after pending resolved', { id: notificationId, category: normalizedCategory });
+    emitChange();
+    repositionOverlays();
+  }
+
   return {
     showNotification,
+    dismissNotification,
     clearAll,
     getState
   };
