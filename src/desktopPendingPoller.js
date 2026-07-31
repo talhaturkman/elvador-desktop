@@ -4,7 +4,7 @@ const DEFAULT_REMINDER_INTERVAL_MS = 300000;
 const CATEGORY_COPY = {
   liveSupport: { title: 'Destek Bildirimi', label: 'destek talebi', sourceLabel: 'Destek', sourceInitials: 'DS' },
   reservation: { title: 'Rezervasyon Bildirimi', label: 'rezervasyon talebi', sourceLabel: 'Rezervasyon', sourceInitials: 'RZ' },
-  housekeeping: { title: 'Kat Hizmetleri Bildirimi', label: 'kat hizmetleri talebi', sourceLabel: 'Kat Hizmetleri', sourceInitials: 'HK' },
+  housekeeping: { title: 'Kat Hizmetleri Bildirimi', label: 'kat hizmetleri talebi', sourceLabel: 'Kat Hizmeti', sourceInitials: 'HK' },
   technic: { title: 'Teknik Bildirimi', label: 'teknik talep', sourceLabel: 'Teknik', sourceInitials: 'TK' },
   orders: { title: 'Sipariş Bildirimi', label: 'sipariş talebi', sourceLabel: 'Sipariş', sourceInitials: 'SP' },
   upsell: { title: 'Upsell Bildirimi', label: 'upsell talebi', sourceLabel: 'Upsell', sourceInitials: 'UP' },
@@ -22,11 +22,43 @@ function coerceTimestampMs(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function getPendingItemKey(sourceKey, item, index) {
+  const requestId = String(item?.id || item?.requestId || '').trim();
+  return requestId
+    ? `${sourceKey}:${requestId}`
+    : `${sourceKey}:unknown:${item?.requestedAt || index}`;
+}
+
 function buildSourceUrl(brand, tab) {
   const brandPart = String(brand || '').trim();
   const tabPart = String(tab || '').trim();
   const adminPath = brandPart ? `/${brandPart}/admin` : '/admin';
   return tabPart ? `${adminPath}?tab=${encodeURIComponent(tabPart)}` : adminPath;
+}
+
+function formatHousekeepingSubject(value) {
+  const subject = String(value || '')
+    .trim()
+    .replace(/^(?:odama|odaya|odam için)\s+/i, '')
+    .replace(/[\s,.!?]+$/, '')
+    .replace(/^(.+?)\s+(?:istiyorum|isterim|rica(?:\s+ediyorum|\s+ederim)?)\s+(\d+)\s*(?:adet|tane)\b/i, '$2 Adet $1')
+    .replace(/\s+(?:(?:gönder|getir|ver)(?:ilmesini|ilmesi|ilebilir\s+misiniz|ebilir\s+misiniz|ir\s+misiniz|in)?|rica(?:\s+ediyorum|\s+ederim)?|istiyorum|isterim|lütfen|lazım(?:\s+ya)?|lazim(?:\s+ya)?|gerekiyor|gerekli)$/i, '')
+    .trim();
+
+  return subject
+    .split(/\s+/)
+    .map((word) => word.toLocaleLowerCase('tr-TR') === 'wc'
+      ? 'WC'
+      : `${word.charAt(0).toLocaleUpperCase('tr-TR')}${word.slice(1).toLocaleLowerCase('tr-TR')}`)
+    .join(' ');
+}
+
+function buildServiceDetailLabel(item, category) {
+  const rawSubject = String(item?.serviceSubject || '').trim();
+  const serviceSubject = category === 'housekeeping'
+    ? formatHousekeepingSubject(rawSubject)
+    : rawSubject;
+  return serviceSubject;
 }
 
 function createDesktopPendingPoller({
@@ -46,7 +78,8 @@ function createDesktopPendingPoller({
   let hasCompletedInitialPoll = false;
   let previousCounts = new Map();
   let previousSources = new Map();
-  let lastReminderNotificationAt = 0;
+  let previousPendingItemKeys = new Map();
+  let lastNotificationAtById = new Map();
   let lastError = null;
   let lastPollAt = null;
   let lastTotalPending = 0;
@@ -83,18 +116,23 @@ function createDesktopPendingPoller({
     emitState();
   }
 
-  function makeNotification(source, totalBrand) {
+  function makeNotification(source, item, totalBrand) {
     const copy = CATEGORY_COPY[source.category] || CATEGORY_COPY.liveSupport;
-    const oldestItem = source.items?.[0] || null;
+    const sourceKey = source.key || `${source.category}:${source.tab}`;
+    const notificationId = getPendingItemKey(sourceKey, item, 0);
     return {
-      id: source.key || `${source.category}:${totalBrand || 'default'}`,
+      id: notificationId,
       category: source.category,
       sourceLabel: copy.sourceLabel,
       sourceInitials: copy.sourceInitials,
-      count: source.count,
+      count: 1,
       oldestRequestedAt: source.oldestRequestedAt,
-      roomNumber: oldestItem?.roomNumber || null,
-      acknowledgementKey: `${source.key || `${source.category}:${source.tab}`}:${source.count}`,
+      roomNumber: item?.roomNumber || null,
+      guestName: item?.guestName || null,
+      requestId: item?.id || item?.requestId || null,
+      detailLabel: buildServiceDetailLabel(item, source.category),
+      reservationLocation: item?.reservationLocation || null,
+      acknowledgementKey: notificationId,
       title: copy.title,
       body: `${source.count} bekleyen ${copy.label}`,
       url: buildSourceUrl(totalBrand, source.tab),
@@ -102,70 +140,10 @@ function createDesktopPendingPoller({
     };
   }
 
-  function makeSummaryNotification(sources, totalPending, totalBrand) {
-    const brandPart = totalBrand || brand;
-    const visibleSources = sources
-      .map((source) => ({
-        ...source,
-        count: Math.max(0, Number(source.count) || 0)
-      }))
-      .filter((source) => source.count > 0);
-    const firstSource = visibleSources[0] || null;
-    const firstCopy = firstSource ? (CATEGORY_COPY[firstSource.category] || CATEGORY_COPY.liveSupport) : null;
-    const oldestTimestampMs = visibleSources.reduce((oldest, source) => {
-      const timestampMs = coerceTimestampMs(source.oldestRequestedAt);
-      if (!timestampMs) {
-        return oldest;
-      }
-      return oldest === null || timestampMs < oldest ? timestampMs : oldest;
-    }, null);
-
-    let oldestItem = null;
-    let minTimestamp = null;
-    visibleSources.forEach((src) => {
-      const item = src.items?.[0];
-      if (item && item.requestedAt) {
-        const ts = Date.parse(item.requestedAt);
-        if (minTimestamp === null || ts < minTimestamp) {
-          minTimestamp = ts;
-          oldestItem = item;
-        }
-      }
-    });
-
-    const sourceSummary = visibleSources
-      .slice(0, 3)
-      .map((source) => {
-        const copy = CATEGORY_COPY[source.category] || CATEGORY_COPY.liveSupport;
-        return `${source.count} ${copy.sourceLabel}`;
-      })
-      .join(' / ');
-
-    return {
-      id: `pending-summary:${brandPart || 'default'}`,
-      category: firstSource?.category || 'panel-visual-notification',
-      sourceLabel: visibleSources.length === 1 && firstCopy ? firstCopy.sourceLabel : 'Panel',
-      sourceInitials: visibleSources.length === 1 && firstCopy ? firstCopy.sourceInitials : String(totalPending),
-      count: totalPending,
-      oldestRequestedAt: oldestTimestampMs ? new Date(oldestTimestampMs).toISOString() : null,
-      roomNumber: oldestItem?.roomNumber || null,
-      title: visibleSources.length === 1 && firstCopy ? firstCopy.title : 'Bekleyen Talepler',
-      body: sourceSummary || `${totalPending} bekleyen talep`,
-      url: buildSourceUrl(brandPart, visibleSources.length === 1 ? firstSource?.tab : ''),
-      persist: true
-    };
-  }
-
-  function showPendingNotification(sources, totalPending, totalBrand) {
-    const visibleSources = sources.filter((source) => Math.max(0, Number(source.count) || 0) > 0);
-    if (visibleSources.length === 0 || totalPending <= 0) {
-      return null;
-    }
-
-    const notification = visibleSources.length === 1
-      ? makeNotification(visibleSources[0], totalBrand)
-      : makeSummaryNotification(visibleSources, totalPending, totalBrand);
-    return showNotification(notification);
+  function showPendingNotifications(entries, totalBrand) {
+    return entries.map(({ source, item }) => showNotification(
+      makeNotification(source, item, totalBrand)
+    ));
   }
 
   async function poll() {
@@ -197,6 +175,8 @@ function createDesktopPendingPoller({
       const sources = Array.isArray(payload.sources) ? payload.sources : [];
       const nextCounts = new Map();
       const nextSources = new Map();
+      const nextPendingItemKeys = new Map();
+      const newPendingEntries = [];
       const now = Date.now();
       let hasNotificationTrigger = false;
       let totalPending = 0;
@@ -205,33 +185,63 @@ function createDesktopPendingPoller({
         const sourceKey = source.key || `${source.category}:${source.tab}`;
         const nextCount = Math.max(0, Number(source.count) || 0);
         const previousCount = previousCounts.get(sourceKey) || 0;
+        const previousItemKeys = previousPendingItemKeys.get(sourceKey) || new Set();
+        const sourceItemKeys = new Set();
         nextCounts.set(sourceKey, nextCount);
         nextSources.set(sourceKey, { category: source.category, count: nextCount });
+        (Array.isArray(source.items) ? source.items : []).forEach((item, index) => {
+          const itemKey = getPendingItemKey(sourceKey, item, index);
+          sourceItemKeys.add(itemKey);
+          if (!hasCompletedInitialPoll || !previousItemKeys.has(itemKey)) {
+            newPendingEntries.push({ source, item, index });
+          }
+        });
+        nextPendingItemKeys.set(sourceKey, sourceItemKeys);
         totalPending += nextCount;
 
         if (nextCount > 0 && (!hasCompletedInitialPoll || nextCount > previousCount)) {
           hasNotificationTrigger = true;
+        }
+
+        for (const previousItemKey of previousItemKeys) {
+          if (!sourceItemKeys.has(previousItemKey)) {
+            dismissNotification({ id: previousItemKey, category: source.category });
+            lastNotificationAtById.delete(previousItemKey);
+            writeLog('pending notification resolved', { notificationId: previousItemKey, category: source.category });
+          }
         }
       });
 
       for (const [sourceKey, previousSource] of previousSources.entries()) {
         const nextSource = nextSources.get(sourceKey);
         if (!nextSource || nextSource.count <= 0) {
-          dismissNotification({ id: sourceKey, category: previousSource.category });
-          writeLog('pending notification resolved', { sourceKey, category: previousSource.category, previousCount: previousSource.count });
+          for (const notificationId of previousPendingItemKeys.get(sourceKey) || []) {
+            dismissNotification({ id: notificationId, category: previousSource.category });
+            lastNotificationAtById.delete(notificationId);
+            writeLog('pending notification resolved', { notificationId, category: previousSource.category });
+          }
         }
       }
 
-      const reminderDue = totalPending > 0 && now - lastReminderNotificationAt >= reminderIntervalMs;
-      if (hasNotificationTrigger || reminderDue) {
-        const result = showPendingNotification(
-          sources,
-          totalPending,
-          payload.brand || brand
-        );
-        if (!result || result.shown !== false) {
-          lastReminderNotificationAt = now;
-        }
+      const allPendingEntries = sources.flatMap((source) => (
+        Array.isArray(source.items) ? source.items.map((item, index) => ({ source, item, index })) : []
+      ));
+      const reminderEntries = allPendingEntries.filter(({ source, item, index }) => {
+        const sourceKey = source.key || `${source.category}:${source.tab}`;
+        const notificationId = getPendingItemKey(sourceKey, item, index);
+        const lastNotificationAt = lastNotificationAtById.get(notificationId) || 0;
+        return now - lastNotificationAt >= reminderIntervalMs;
+      });
+      const entriesToShow = hasNotificationTrigger
+        ? newPendingEntries
+        : reminderEntries;
+      const reminderDue = reminderEntries.length > 0;
+      if (entriesToShow.length > 0) {
+        showPendingNotifications(entriesToShow, payload.brand || brand);
+        entriesToShow.forEach(({ source, item, index = 0 }) => {
+          const sourceKey = source.key || `${source.category}:${source.tab}`;
+          lastNotificationAtById.set(getPendingItemKey(sourceKey, item, index), now);
+        });
       }
 
       writeLog('pending poll', {
@@ -242,6 +252,7 @@ function createDesktopPendingPoller({
 
       previousCounts = nextCounts;
       previousSources = nextSources;
+      previousPendingItemKeys = nextPendingItemKeys;
       brand = payload.brand || brand;
       lastPollAt = new Date().toISOString();
       lastTotalPending = totalPending;
@@ -253,7 +264,8 @@ function createDesktopPendingPoller({
         authToken = null;
         previousCounts = new Map();
         previousSources = new Map();
-        lastReminderNotificationAt = 0;
+        previousPendingItemKeys = new Map();
+        lastNotificationAtById = new Map();
         lastTotalPending = 0;
         hasCompletedInitialPoll = false;
       }
@@ -279,7 +291,8 @@ function createDesktopPendingPoller({
     if (tokenChanged) {
       previousCounts = new Map();
       previousSources = new Map();
-      lastReminderNotificationAt = 0;
+      previousPendingItemKeys = new Map();
+      lastNotificationAtById = new Map();
       lastTotalPending = 0;
       hasCompletedInitialPoll = false;
     }
@@ -292,7 +305,8 @@ function createDesktopPendingPoller({
     authToken = null;
     previousCounts = new Map();
     previousSources = new Map();
-    lastReminderNotificationAt = 0;
+    previousPendingItemKeys = new Map();
+    lastNotificationAtById = new Map();
     lastTotalPending = 0;
     hasCompletedInitialPoll = false;
     clearTimer();

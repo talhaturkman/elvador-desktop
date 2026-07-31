@@ -9,8 +9,13 @@ let lastPanelNotificationCount = 0;
 let lastPanelNotificationSignature = '';
 let lastPanelNotificationAt = 0;
 let lastDirectNativeNotificationAt = 0;
+let hasUsedDirectNativeBridge = false;
 let panelNotificationObserver = null;
 let panelNotificationEvaluateTimer = null;
+const pendingDirectDetailPayloads = new Map();
+let lastPanelDetailEnrichmentSignature = '';
+const pendingNotificationOpenedPayloads = [];
+let notificationOpenedListenerCount = 0;
 
 function traceDesktopNotification(event, details = {}) {
   console.info('[DESKTOP_NOTIFICATION_TRACE]', {
@@ -167,13 +172,16 @@ function getCurrentPanelUrl() {
 }
 
 function parsePanelChip(chip) {
-  if (!chip || chip.classList?.contains('admin-visual-alert-ribbon__chip--more')) {
+  if (
+    !chip
+    || chip.classList?.contains('admin-visual-alert-ribbon__chip--more')
+    || chip.classList?.contains('admin-visual-alert-ribbon__chip--seen')
+  ) {
     return null;
   }
 
-  const countText = normalizeText(chip.querySelector?.('.admin-visual-alert-ribbon__chip-count')?.textContent)
-    || normalizeText(chip.textContent);
-  const count = Number(countText.replace(/^\+/, '')) || parsePendingCountFromText(countText);
+  const countText = normalizeText(chip.querySelector?.('.admin-visual-alert-ribbon__chip-count')?.textContent);
+  const count = Number(countText.replace(/^\+/, '')) || 1;
   if (count <= 0) {
     return null;
   }
@@ -181,11 +189,16 @@ function parsePanelChip(chip) {
   const rawLabel = normalizeText(chip.querySelector?.('.admin-visual-alert-ribbon__chip-label')?.textContent)
     || normalizeText(chip.getAttribute?.('title')).replace(/^\d+\s+/, '')
     || 'Talep';
+  const detailLabel = normalizeText(chip.querySelector?.('.admin-visual-alert-ribbon__chip-detail')?.textContent)
+    .replace(/^\s*-\s*/, '');
   const sourceInfo = getPanelSourceInfo(rawLabel);
   return {
     ...sourceInfo,
     count,
-    rawLabel
+    rawLabel,
+    detailLabel,
+    requestId: normalizeText(chip.getAttribute?.('data-request-id')),
+    roomNumber: normalizeText(chip.getAttribute?.('data-room-number'))
   };
 }
 
@@ -242,6 +255,8 @@ function getPanelVisualNotificationContext() {
     : 'Bekleyen Talepler';
   const ageText = ageLabel ? `${ageLabel} açık` : '';
   const body = [summary, ageText].filter(Boolean).join(' | ');
+  const guestName = firstItem?.category === 'reservation' ? firstItem.detailLabel : '';
+  const detailLabel = firstItem?.detailLabel || '';
 
   return {
     id: 'panel-visual-notification',
@@ -254,6 +269,10 @@ function getPanelVisualNotificationContext() {
     persist: true,
     count,
     ageLabel,
+    guestName,
+    detailLabel,
+    requestId: firstItem?.requestId || '',
+    roomNumber: firstItem?.roomNumber || '',
     items
   };
 }
@@ -262,6 +281,10 @@ function getPanelVisualNotificationPayload() {
   const context = getPanelVisualNotificationContext();
   if (context) {
     return context;
+  }
+
+  if (document.querySelector(PANEL_VISUAL_NOTIFICATION_SELECTOR)) {
+    return null;
   }
 
   const titleText = normalizeText(document.title);
@@ -301,12 +324,93 @@ function enrichNotificationPayloadFromPanel(payload = {}) {
     count: Number(payload.count) || sourceItem?.count || context.count,
     sourceLabel: payload.sourceLabel || sourceItem?.label || context.sourceLabel,
     sourceInitials: payload.sourceInitials || sourceItem?.initials || context.sourceInitials,
-    ageLabel: payload.ageLabel || context.ageLabel
+    ageLabel: payload.ageLabel || context.ageLabel,
+    detailLabel: payload.detailLabel || sourceItem?.detailLabel || '',
+    requestId: payload.requestId || sourceItem?.requestId || '',
+    roomNumber: payload.roomNumber || sourceItem?.roomNumber || '',
+    guestName: payload.guestName
+      || (payloadCategory === 'reservation' ? sourceItem?.detailLabel : '')
+      || context.guestName
   };
 }
 
+function queueDirectDetailEnrichment(payload) {
+  if (!payload?.id || normalizeText(payload.detailLabel)) {
+    return;
+  }
+
+  pendingDirectDetailPayloads.set(payload.id, payload);
+}
+
+function enrichQueuedDirectNotifications() {
+  for (const [notificationId, payload] of pendingDirectDetailPayloads.entries()) {
+    const enrichedPayload = enrichNotificationPayloadFromPanel({
+      ...payload,
+      bridgeSource: 'page-direct-detail-enrichment',
+      playSound: false
+    });
+    if (!normalizeText(enrichedPayload.detailLabel)) {
+      continue;
+    }
+
+    pendingDirectDetailPayloads.delete(notificationId);
+    void ipcRenderer.invoke('elvador:show-native-notification', enrichedPayload)
+      .then((result) => {
+        traceDesktopNotification('page_direct_detail_enriched', {
+          id: enrichedPayload.id,
+          category: enrichedPayload.category,
+          detailLabel: enrichedPayload.detailLabel,
+          result
+        });
+      });
+  }
+}
+
+function syncVisibleServiceDetailToNativeNotification() {
+  const context = getPanelVisualNotificationContext();
+  const item = context?.items?.length === 1 ? context.items[0] : null;
+  const category = normalizePayloadCategory(item?.category);
+  const detailLabel = normalizeText(item?.detailLabel);
+  const brand = normalizeKeyText(getStoredAdminSession().brand);
+  if (!detailLabel || !brand || !['housekeeping', 'technic'].includes(category)) {
+    return;
+  }
+
+  const sourceId = `service:${brand}:${category}`;
+  const signature = `${sourceId}:${item.count}:${detailLabel}`;
+  if (signature === lastPanelDetailEnrichmentSignature) {
+    return;
+  }
+
+  lastPanelDetailEnrichmentSignature = signature;
+  void ipcRenderer.invoke('elvador:show-native-notification', {
+    id: sourceId,
+    category,
+    count: item.count,
+    sourceLabel: category === 'housekeeping' ? 'Kat Hizmeti' : item.label,
+    sourceInitials: item.initials,
+    title: context.title,
+    body: context.body,
+    url: getCurrentPanelUrl(),
+    persist: true,
+    playSound: false,
+    detailLabel,
+    requestId: item.requestId || '',
+    roomNumber: item.roomNumber || '',
+    bridgeSource: 'panel-visible-detail-sync'
+  }).then((result) => {
+    traceDesktopNotification('panel_visible_detail_synced', {
+      id: sourceId,
+      category,
+      detailLabel,
+      result
+    });
+  });
+}
+
 function isPanelFallbackSuppressedByDirectBridge() {
-  return Date.now() - lastDirectNativeNotificationAt <= PANEL_FALLBACK_SUPPRESS_AFTER_DIRECT_MS;
+  return hasUsedDirectNativeBridge
+    || Date.now() - lastDirectNativeNotificationAt <= PANEL_FALLBACK_SUPPRESS_AFTER_DIRECT_MS;
 }
 
 function shouldNotifyPanelVisualNotification(payload) {
@@ -348,6 +452,7 @@ function shouldNotifyPanelVisualNotification(payload) {
 
 function evaluatePanelVisualNotification() {
   panelNotificationEvaluateTimer = null;
+  enrichQueuedDirectNotifications();
   const payload = getPanelVisualNotificationPayload();
   if (!payload) {
     if (lastPanelNotificationCount > 0) {
@@ -412,11 +517,13 @@ function startPanelVisualNotificationObserver() {
 
 function showNativeNotificationFromPage(payload = {}) {
   lastDirectNativeNotificationAt = Date.now();
+  hasUsedDirectNativeBridge = true;
   const enrichedPayload = enrichNotificationPayloadFromPanel({
     ...payload,
     bridgeSource: 'page-direct',
     playSound: payload.playSound === true
   });
+  queueDirectDetailEnrichment(enrichedPayload);
   traceDesktopNotification('page_direct_requested', {
     id: enrichedPayload.id,
     category: enrichedPayload.category,
@@ -446,6 +553,46 @@ function playNotificationSoundFromPage(options = {}) {
 
 function stopNotificationSoundFromPage(reason = 'page-direct') {
   return ipcRenderer.invoke('elvador:stop-notification-sound', reason);
+}
+
+function acknowledgeNativeNotificationFromPage(payload = {}) {
+  return ipcRenderer.invoke('elvador:acknowledge-native-notification', payload);
+}
+
+function onNotificationOpened(listener) {
+  if (typeof listener !== 'function') {
+    return () => {};
+  }
+
+  const handler = (event) => listener(event.detail || {});
+  window.addEventListener('elvador-notification-opened', handler);
+  notificationOpenedListenerCount += 1;
+
+  while (pendingNotificationOpenedPayloads.length > 0) {
+    listener(pendingNotificationOpenedPayloads.shift());
+  }
+
+  return () => {
+    window.removeEventListener('elvador-notification-opened', handler);
+    notificationOpenedListenerCount = Math.max(0, notificationOpenedListenerCount - 1);
+  };
+}
+
+ipcRenderer.on('elvador:notification-opened', (_event, payload = {}) => {
+  const detail = payload && typeof payload === 'object' ? payload : {};
+  traceDesktopNotification('native_notification_opened_delivered', {
+    id: detail.id || null,
+    category: detail.category || null,
+    requestId: detail.requestId || null
+  });
+  if (notificationOpenedListenerCount === 0) {
+    pendingNotificationOpenedPayloads.push(detail);
+  }
+  window.dispatchEvent(new CustomEvent('elvador-notification-opened', { detail }));
+});
+
+function reportNotificationReadState(details = {}) {
+  return ipcRenderer.invoke('elvador:notification-read-state-applied', details);
 }
 
 function reportWebDeployReloadFromSession() {
@@ -485,17 +632,15 @@ contextBridge.exposeInMainWorld('elvadorDesktop', {
   saveAdminAccessLink: (value) => ipcRenderer.invoke('elvador:save-admin-access-link', value),
   showNativeNotification: showNativeNotificationFromPage,
   playNotificationSound: playNotificationSoundFromPage,
-  stopNotificationSound: stopNotificationSoundFromPage
+  stopNotificationSound: stopNotificationSoundFromPage,
+  acknowledgeNativeNotification: acknowledgeNativeNotificationFromPage,
+  onNotificationOpened,
+  reportNotificationReadState
 });
 
 window.addEventListener('DOMContentLoaded', () => {
   reportWebDeployReloadFromSession();
   syncStoredAdminSession();
   window.setInterval(syncStoredAdminSession, 4000);
-  startPanelVisualNotificationObserver();
   window.dispatchEvent(new CustomEvent('elvador-desktop-ready'));
-});
-
-ipcRenderer.on('elvador:notification-opened', (_event, payload = {}) => {
-  traceDesktopNotification('native_notification_opened', payload);
 });

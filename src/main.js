@@ -116,6 +116,11 @@ const { createNativeNotificationSoundService } = require('./nativeNotificationSo
 const { createDesktopPendingPoller } = require('./desktopPendingPoller');
 const { createWebDeployMonitor } = require('./webDeployMonitor');
 
+if (!app.isPackaged) {
+  process.env.ELVADOR_ADMIN_URL = process.env.ELVADOR_ADMIN_URL || 'http://127.0.0.1:3000/admin';
+  process.env.ELVADOR_API_BASE_URL = process.env.ELVADOR_API_BASE_URL || 'http://127.0.0.1:5002';
+}
+
 const config = getDesktopConfig();
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 const logDirectory = earlyLogDirectory;
@@ -138,6 +143,8 @@ let desktopSettings = {};
 let developerShortcutState = {};
 let lastDevToolsRequestAt = null;
 let startupStableTimer = null;
+let developmentSourceWatcher = null;
+let developmentReloadTimer = null;
 let updatePromptState = {
   open: false,
   promptedVersion: null,
@@ -156,6 +163,34 @@ function writeDesktopLog(message, details = null) {
   }
 }
 
+function startDevelopmentSourceWatcher() {
+  if (app.isPackaged || developmentSourceWatcher) {
+    return;
+  }
+
+  try {
+    const sourceDirectory = path.join(__dirname);
+    developmentSourceWatcher = fs.watch(sourceDirectory, { recursive: true }, (_eventType, filename) => {
+      if (!filename || isQuitting) {
+        return;
+      }
+
+      clearTimeout(developmentReloadTimer);
+      developmentReloadTimer = setTimeout(() => {
+        if (isQuitting) {
+          return;
+        }
+
+        writeDesktopLog('development source changed, restarting', { filename });
+        app.relaunch();
+        app.exit(0);
+      }, 300);
+    });
+    writeDesktopLog('development source watcher started', { sourceDirectory });
+  } catch (error) {
+    writeDesktopLog('development source watcher failed', { message: error?.message });
+  }
+}
 function emitWebDeployBrowserLog(event, details = {}) {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return;
@@ -476,6 +511,16 @@ function getAppIconPath() {
     return fs.existsSync(packagedIconPath) ? packagedIconPath : path.join(process.resourcesPath || '', 'icon-512.png');
   }
   return fs.existsSync(repoIconPath) ? repoIconPath : fallbackPath;
+}
+
+function getNotificationIconDataUrl(filename) {
+  const iconPath = path.join(__dirname, '..', 'assets', 'notification-icons', filename);
+  try {
+    return `data:image/svg+xml;base64,${fs.readFileSync(iconPath).toString('base64')}`;
+  } catch (error) {
+    writeDesktopLog('notification icon asset unavailable', { filename, message: error?.message });
+    return '';
+  }
 }
 
 function getDesktopSettingsPath() {
@@ -1339,6 +1384,17 @@ function registerIpcHandlers() {
     return { ok: true };
   });
 
+  ipcMain.handle('elvador:notification-read-state-applied', (_event, details = {}) => {
+    writeDesktopLog('web notification read state applied', {
+      category: details?.category || null,
+      requestId: details?.requestId || null,
+      seenKey: details?.seenKey || null,
+      phase: details?.phase || 'state_written',
+      cardClassName: details?.cardClassName || null
+    });
+    return { ok: true };
+  });
+
   ipcMain.handle('elvador:save-admin-access-link', (event, rawValue = '') => {
     if (!isInternalOnboardingSender(event)) {
       return {
@@ -1364,6 +1420,13 @@ function registerIpcHandlers() {
 
   ipcMain.handle('elvador:show-native-notification', (_event, payload = {}) => {
     return notificationService.showNotification(payload);
+  });
+
+  ipcMain.handle('elvador:acknowledge-native-notification', (_event, payload = {}) => {
+    return notificationService?.acknowledgeNotification(payload) || {
+      acknowledged: false,
+      reason: 'notification_service_unavailable'
+    };
   });
 
   ipcMain.handle('elvador:play-notification-sound', (_event, options = {}) => {
@@ -1423,6 +1486,10 @@ if (!gotSingleInstanceLock) {
     const iconPath = getAppIconPath();
     notificationService = createNativeNotificationService({
       appIconPath: iconPath,
+      reservationIconUrl: getNotificationIconDataUrl('reservation.svg'),
+      housekeepingIconUrl: getNotificationIconDataUrl('Housekeeping.svg'),
+      clockIconUrl: getNotificationIconDataUrl('clock.svg'),
+      notificationsIconUrl: getNotificationIconDataUrl('Notifications.svg'),
       overlayPreloadPath: path.join(__dirname, 'overlayPreload.js'),
       focusApp: focusMainWindow,
       openInApp,
@@ -1458,25 +1525,15 @@ if (!gotSingleInstanceLock) {
     createMainWindow();
     createTray();
     webDeployMonitor.start();
-    if (process.env.ELVADOR_SHOW_TEST_NOTIFICATION_ON_START === 'true') {
-      setTimeout(() => {
-        notificationService?.showNotification({
-          id: `startup-test-${Date.now()}`,
-          title: 'Elvador Desktop',
-          body: 'Üstte kalan Elvador bildirimi çalışıyor.',
-          url: getStartupUrl(),
-          persist: true,
-          category: 'desktop-test'
-        });
-      }, 1200);
-    }
-    autoUpdater.logger = { info: (m) => writeDesktopLog('updater:info', m), warn: (m) => writeDesktopLog('updater:warn', m), error: (m) => writeDesktopLog('updater:error', m) };
+    startDevelopmentSourceWatcher();
+    if (app.isPackaged) {
+      autoUpdater.logger = { info: (m) => writeDesktopLog('updater:info', m), warn: (m) => writeDesktopLog('updater:warn', m), error: (m) => writeDesktopLog('updater:error', m) };
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = true;
     autoUpdater.on('update-available', (info) => {
       writeDesktopLog('update available', { version: info?.version });
-    });
-    autoUpdater.on('update-downloaded', (info) => {
+      });
+      autoUpdater.on('update-downloaded', (info) => {
       writeDesktopLog('update downloaded', { version: info?.version });
       const updateVersion = String(info?.version || '').trim() || 'unknown';
       if (updatePromptState.open) {
@@ -1521,9 +1578,12 @@ if (!gotSingleInstanceLock) {
     });
     autoUpdater.on('error', (err) => {
       writeDesktopLog('updater error', { message: err?.message });
-    });
-    setTimeout(() => { autoUpdater.checkForUpdates().catch(() => {}); }, 10000);
-    setInterval(() => { autoUpdater.checkForUpdates().catch(() => {}); }, AUTO_UPDATE_CHECK_INTERVAL_MS);
+      });
+      setTimeout(() => { autoUpdater.checkForUpdates().catch(() => {}); }, 10000);
+      setInterval(() => { autoUpdater.checkForUpdates().catch(() => {}); }, AUTO_UPDATE_CHECK_INTERVAL_MS);
+    } else {
+      writeDesktopLog('development mode: release updater disabled');
+    }
 
     writeDesktopLog('main window and tray created');
     startupStableTimer = setTimeout(() => {
@@ -1549,6 +1609,10 @@ if (!gotSingleInstanceLock) {
 
   app.on('before-quit', () => {
     isQuitting = true;
+    developmentSourceWatcher?.close();
+    developmentSourceWatcher = null;
+    clearTimeout(developmentReloadTimer);
+    developmentReloadTimer = null;
     if (startupStableTimer) {
       clearTimeout(startupStableTimer);
       startupStableTimer = null;

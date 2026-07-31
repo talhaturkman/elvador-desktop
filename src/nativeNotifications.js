@@ -1,13 +1,14 @@
 const { BrowserWindow, ipcMain, screen } = require('electron');
 
-const OVERLAY_WIDTH = 340;
-const OVERLAY_HEIGHT = 104;
+const OVERLAY_WIDTH = 390;
+const OVERLAY_HEIGHT = 190;
 const OVERLAY_MARGIN = 16;
 const OVERLAY_GAP = 10;
 const OVERLAY_CHANNEL_OPEN = 'elvador:overlay-notification-open';
 const ACTIVE_DUPLICATE_SUPPRESS_MS = 45000;
+const OPENED_NOTIFICATION_SUPPRESS_MS = 45000;
 const DEFAULT_NOTIFICATION_SOUND_OPTIONS = Object.freeze({
-  profile: 'critical',
+  profile: 'low',
   soundTone: 'smoothChime',
   volume: 0.75,
   criticalDurationMs: 15000
@@ -74,6 +75,46 @@ function normalizeText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+function coerceTimestampMs(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return value.getTime();
+  }
+
+  if (typeof value.toMillis === 'function') {
+    return value.toMillis();
+  }
+
+  if (typeof value.toDate === 'function') {
+    return value.toDate().getTime();
+  }
+
+  if (typeof value === 'number') {
+    return value > 0 && value < 100000000000 ? value * 1000 : value;
+  }
+
+  if (typeof value === 'object') {
+    const seconds = Number(value.seconds ?? value._seconds);
+    const nanoseconds = Number(value.nanoseconds ?? value._nanoseconds ?? 0);
+    if (Number.isFinite(seconds)) {
+      return (seconds * 1000) + Math.floor(nanoseconds / 1000000);
+    }
+  }
+
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeTimestamp(value) {
+  const timestampMs = coerceTimestampMs(value);
+  return Number.isFinite(timestampMs) && timestampMs > 0
+    ? new Date(timestampMs).toISOString()
+    : null;
+}
+
 function sanitizeColor(value, fallback) {
   const color = String(value || '').trim();
   return /^#[0-9a-f]{6}$/i.test(color) ? color : fallback;
@@ -109,11 +150,7 @@ function parseCountFromText(value) {
 }
 
 function formatOpenAge(value) {
-  if (!value) {
-    return '';
-  }
-
-  const timestampMs = value instanceof Date ? value.getTime() : Date.parse(value);
+  const timestampMs = coerceTimestampMs(value);
   if (!Number.isFinite(timestampMs) || timestampMs <= 0) {
     return '';
   }
@@ -184,6 +221,7 @@ function buildActiveNotificationFingerprint(notification) {
   }
 
   return [
+    notification.requestId || notification.id,
     notification.category,
     notification.count,
     notification.url
@@ -228,8 +266,14 @@ function sanitizeNotificationPayload(payload = {}) {
   const ageLabel = normalizeText(payload.ageLabel)
     || formatOpenAge(payload.oldestRequestedAt || payload.requestedAt || payload.createdAt);
 
-  const oldestRequestedAt = payload.oldestRequestedAt || payload.requestedAt || payload.createdAt || estimateOldestRequestedAt(ageLabel) || null;
+  const oldestRequestedAt = normalizeTimestamp(
+    payload.oldestRequestedAt || payload.requestedAt || payload.createdAt
+  ) || estimateOldestRequestedAt(ageLabel) || null;
   const roomNumber = normalizeText(payload.roomNumber || '');
+  const guestName = normalizeText(payload.guestName || payload.fullName || '');
+  const requestId = normalizeText(payload.requestId || '');
+  const detailLabel = normalizeText(payload.detailLabel || '');
+  const reservationLocation = normalizeText(payload.reservationLocation || '');
 
   return {
     id,
@@ -243,6 +287,10 @@ function sanitizeNotificationPayload(payload = {}) {
     count,
     ageLabel,
     roomNumber,
+    guestName,
+    requestId,
+    detailLabel,
+    reservationLocation,
     oldestRequestedAt,
     acknowledgementKey: normalizeText(payload.acknowledgementKey),
     persist: payload.persist !== false,
@@ -272,36 +320,82 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
+function isOverlayIconSource(value) {
+  const source = String(value || '').trim();
+  return /^https?:\/\/[\w.-]+(?::\d+)?\//i.test(source)
+    || /^data:image\/svg\+xml;base64,[a-z0-9+/]+=*$/i.test(source);
+}
+
 function buildOverlayHtml(notification) {
   const id = escapeHtml(notification.id);
   const title = escapeHtml(notification.title);
-  const count = notification.count || 0;
+  const count = notification.count || 1;
 
   let cleanTitleType = title.replace(/bildirimi/i, '').replace(/talepleri/i, '').replace(/talebi/i, '').trim();
   if (cleanTitleType.toLowerCase().includes('destek')) {
-    cleanTitleType = 'DESTEK';
+    cleanTitleType = 'Destek';
   } else if (cleanTitleType.toLowerCase().includes('sohbet')) {
-    cleanTitleType = 'SOHBET';
+    cleanTitleType = 'Sohbet';
   } else if (cleanTitleType.toLowerCase().includes('rezervasyon')) {
-    cleanTitleType = 'REZERVASYON';
+    cleanTitleType = 'Rezervasyon';
   } else if (cleanTitleType.toLowerCase().includes('kat hizmetleri') || cleanTitleType.toLowerCase().includes('temizlik')) {
-    cleanTitleType = 'KAT HİZMETLERİ';
+    cleanTitleType = 'Kat Hizmetleri';
   } else if (cleanTitleType.toLowerCase().includes('teknik')) {
-    cleanTitleType = 'TEKNİK';
+    cleanTitleType = 'Teknik';
   } else if (cleanTitleType.toLowerCase().includes('sipariş') || cleanTitleType.toLowerCase().includes('yemek')) {
-    cleanTitleType = 'SİPARİŞ';
+    cleanTitleType = 'Sipariş';
   } else if (cleanTitleType.toLowerCase().includes('upsell')) {
-    cleanTitleType = 'UPSELL';
+    cleanTitleType = 'Upsell';
   } else if (cleanTitleType.toLowerCase().includes('spa')) {
-    cleanTitleType = 'SPA';
+    cleanTitleType = 'Spa';
   } else if (cleanTitleType.toLowerCase().includes('kayıp')) {
-    cleanTitleType = 'KAYIP EŞYA';
+    cleanTitleType = 'Kayıp Eşya';
   }
 
-  const displayTitle = `BEKLEYEN ${cleanTitleType.toUpperCase()}(${count})`;
-  const roomLabel = (notification.category === 'orders' || cleanTitleType.toLowerCase().includes('sipariş')) ? 'MASA' : 'ODA';
-  const roomValue = notification.roomNumber ? escapeHtml(notification.roomNumber) : 'GENEL';
-  const oldestTimeEpoch = notification.oldestRequestedAt ? Date.parse(notification.oldestRequestedAt) : Date.now();
+  const displayTitle = 'Bekleyen Talep';
+  const roomValue = notification.roomNumber ? escapeHtml(notification.roomNumber) : '';
+  const reservationGuestName = escapeHtml(notification.guestName);
+  const isReservation = notification.category === 'reservation' || notification.category === 'ordersReservations';
+  const serviceSourceLabel = notification.category === 'panelVisualNotification'
+    ? ''
+    : escapeHtml(notification.sourceLabel);
+  const serviceRequestTitle = escapeHtml(notification.detailLabel);
+  const rawRoomNumber = String(notification.roomNumber || '').trim();
+  const rawDetailLabel = String(notification.detailLabel || '').trim().toLocaleLowerCase('tr-TR');
+  const detailIncludesRoom = rawRoomNumber && (
+    rawDetailLabel === rawRoomNumber.toLocaleLowerCase('tr-TR')
+    || rawDetailLabel.startsWith(`oda ${rawRoomNumber.toLocaleLowerCase('tr-TR')}`)
+    || rawDetailLabel.startsWith(`${rawRoomNumber.toLocaleLowerCase('tr-TR')} -`)
+  );
+  const requestTitle = isReservation
+    ? ['Rezervasyon', reservationGuestName].filter(Boolean).join(' - ')
+    : [serviceSourceLabel || cleanTitleType, detailIncludesRoom ? '' : roomValue, serviceRequestTitle].filter(Boolean).join(' - ');
+  const requestDetail = isReservation
+    ? ''
+    : '';
+  const sharedReservationIconUrl = isOverlayIconSource(notification.reservationIconUrl)
+    ? escapeHtml(notification.reservationIconUrl)
+    : '';
+  const sharedHousekeepingIconUrl = isOverlayIconSource(notification.housekeepingIconUrl)
+    ? escapeHtml(notification.housekeepingIconUrl)
+    : '';
+  const sharedClockIconUrl = isOverlayIconSource(notification.clockIconUrl)
+    ? escapeHtml(notification.clockIconUrl)
+    : '';
+  const sharedNotificationsIconUrl = isOverlayIconSource(notification.notificationsIconUrl)
+    ? escapeHtml(notification.notificationsIconUrl)
+    : '';
+  const requestIcon = isReservation
+    ? (sharedReservationIconUrl
+      ? `<img class="shared-reservation-icon" src="${sharedReservationIconUrl}" width="24" height="24" alt="">`
+      : '<svg viewBox="0 0 24 24" fill="none" width="24" height="24" stroke-width="2.2"><path d="M8 2v4M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/><path d="m9 16 2 2 4-4"/></svg>')
+    : notification.category === 'housekeeping' && sharedHousekeepingIconUrl
+      ? `<img class="shared-housekeeping-icon" src="${sharedHousekeepingIconUrl}" width="24" height="24" alt="">`
+    : '<svg viewBox="0 0 24 24" fill="none" width="24" height="24" stroke-width="2.2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.121 2.121 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.77 3.77Z"/></svg>';
+  const parsedOldestTimeEpoch = coerceTimestampMs(notification.oldestRequestedAt);
+  const oldestTimeEpoch = Number.isFinite(parsedOldestTimeEpoch) && parsedOldestTimeEpoch > 0
+    ? parsedOldestTimeEpoch
+    : Date.now();
 
   return `
 <!doctype html>
@@ -318,116 +412,92 @@ function buildOverlayHtml(notification) {
         height: 100vh;
         display: flex;
         flex-direction: column;
-        justify-content: center;
-        gap: 8px;
-        padding: 10px 16px;
+        gap: 12px;
+        padding: 18px;
         border-radius: 12px;
         background: rgba(220, 38, 38, 0.85);
-        border: 2px solid rgba(248, 113, 113, 0.4);
-        box-shadow: 0 8px 24px rgba(0,0,0,.45);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        box-shadow: 0 4px 14px rgba(220, 38, 38, 0.25), 0 2px 6px rgba(0, 0, 0, 0.1);
         cursor: pointer;
-        animation: enter .16s ease-out;
+        animation: notification-spawn 1150ms cubic-bezier(0.16, 1, 0.3, 1) both, notification-attention 1.2s ease-in-out 1150ms infinite;
       }
-      .row {
+      .headline {
         display: flex;
         align-items: center;
         width: 100%;
-        gap: 8px;
-        line-height: 1.2;
-      }
-      .bell-container {
-        position: relative;
-        width: 24px;
-        height: 24px;
-        flex-shrink: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-      .bell-badge {
-        position: absolute;
-        top: -1px;
-        right: -1px;
-        background: #ef4444;
+        height: 28px;
+        gap: 10px;
         color: #fff;
-        font-size: 8px;
-        font-weight: 800;
-        width: 11px;
-        height: 11px;
-        border-radius: 50%;
-        display: grid;
-        place-items: center;
-        border: 1px solid #fff;
       }
       .title {
-        font-size: 13.5px;
-        font-weight: 800;
+        font-size: 23px;
+        font-weight: 750;
+        line-height: 28px;
         color: #ffffff;
-        letter-spacing: 0.03em;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
         flex: 1;
       }
-      .row-icon-container {
-        width: 24px;
+      .divider { height: 1px; width: 100%; background: #ffffff; }
+      .request-card {
+        flex: 1;
         display: flex;
+        flex-direction: column;
         justify-content: center;
-        align-items: center;
-        flex-shrink: 0;
+        gap: 10px;
+        padding: 14px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.92);
+        color: #5f1024;
       }
-      .text-label {
-        font-size: 12px;
-        font-weight: 700;
-        color: #ffffff;
-        letter-spacing: 0.02em;
+      .request-line { display: flex; align-items: center; gap: 5px; min-width: 0; }
+      .request-name { font-size: 16px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .request-title { font-weight: 700; }
+      .request-detail { font-weight: 400; }
+      .request-age { font-size: 16px; font-weight: 700; color: #5f1024; }
+      .request-age--recent { color: #137333; font-weight: 400; }
+      .request-age--critical { color: #dc2626; }
+      .request-icon { flex: 0 0 24px; color: #5f1024; }
+      .request-icon svg { display: block; stroke: currentColor; }
+      .shared-reservation-icon { display: block; width: 24px; height: 24px; filter: brightness(0) saturate(100%) invert(11%) sepia(76%) saturate(2979%) hue-rotate(326deg) brightness(80%) contrast(100%); }
+      .shared-housekeeping-icon { display: block; width: 24px; height: 24px; filter: brightness(0) saturate(100%) invert(11%) sepia(76%) saturate(2979%) hue-rotate(326deg) brightness(80%) contrast(100%); }
+      .shared-clock-icon { display: block; width: 24px; height: 24px; filter: brightness(0) saturate(100%) invert(11%) sepia(76%) saturate(2979%) hue-rotate(326deg) brightness(80%) contrast(100%); }
+      .headline-icon { display: flex; flex: 0 0 24px; width: 24px; height: 24px; align-items: center; justify-content: center; }
+      .headline-icon svg { display: block; stroke: currentColor; }
+      .headline-icon .shared-notifications-icon { display: block; width: 24px; height: 24px; filter: brightness(0) invert(1); transform: translateY(1px); }
+      @keyframes notification-spawn {
+        from { opacity: 0; translate: 0 calc(100vh + 32px); }
+        to { opacity: 1; translate: 0 0; }
       }
-      .text-value {
-        font-size: 12px;
-        font-weight: 700;
-        color: #ffffff;
-      }
-      .text-value-red {
-        font-size: 12px;
-        font-weight: 800;
-        color: #ff3b30;
-      }
-      @keyframes enter {
-        from { opacity: 0; transform: translateY(6px) scale(.97); }
-        to { opacity: 1; transform: translateY(0) scale(1); }
+      @keyframes notification-attention {
+        0%, 100% { opacity: 0; }
+        50% { opacity: 1; }
       }
     </style>
   </head>
   <body>
     <main class="n" role="button" tabindex="0" data-id="${id}">
-      <div class="row">
-        <div class="bell-container">
-          <svg viewBox="0 0 24 24" fill="#ef4444" width="18" height="18">
-            <path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 4.36 6 6.92 6 10v5l-2 2v1h16v-1l-2-2z"/>
-          </svg>
-          <span class="bell-badge">1</span>
-        </div>
+      <div class="headline">
+        <span class="headline-icon" aria-hidden="true">
+          ${sharedNotificationsIconUrl
+            ? `<img class="shared-notifications-icon" src="${sharedNotificationsIconUrl}" width="24" height="24" alt="">`
+            : '<svg viewBox="0 0 24 24" fill="none" width="24" height="24" stroke-width="2.1"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg>'}
+        </span>
         <span class="title">${displayTitle}</span>
       </div>
-      <div class="row">
-        <div class="row-icon-container">
-          <svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="width: 15px; height: 15px;">
-            <line x1="3" y1="10" x2="21" y2="10" />
-            <line x1="12" y1="10" x2="12" y2="20" />
-            <line x1="8" y1="20" x2="16" y2="20" />
-            <path d="M6 10c0-3 1.5-5 6-5s6 2 6 5" />
-          </svg>
+      <div class="divider" aria-hidden="true"></div>
+      <div class="request-card">
+        <div class="request-line">
+          <span class="request-icon" aria-hidden="true">${requestIcon}</span>
+          <span class="request-name"><span class="request-title">${requestTitle}</span>${requestDetail ? `<span class="request-detail"> - ${requestDetail}</span>` : ''}</span>
         </div>
-        <span class="text-label">${roomLabel}: <span class="text-value">${roomValue}</span></span>
-      </div>
-      <div class="row">
-        <div class="row-icon-container">
-          <svg viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="width: 15px; height: 15px;">
-            <circle cx="12" cy="12" r="10" />
-            <polyline points="12 6 12 12 16 14" />
-          </svg>
+        <div class="request-line">
+          <span class="request-icon" aria-hidden="true">${sharedClockIconUrl
+            ? `<img class="shared-clock-icon" src="${sharedClockIconUrl}" width="24" height="24" alt="">`
+            : '<svg viewBox="0 0 24 24" fill="none" width="24" height="24" stroke-width="2.4"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>'}</span>
+          <span class="request-age request-age--recent" id="time-elapsed">Az önce</span>
         </div>
-        <span class="text-label">SAAT: <span class="text-value-red" id="time-elapsed">YÜKLENİYOR...</span> ÖNCE</span>
       </div>
     </main>
     <script>
@@ -438,23 +508,28 @@ function buildOverlayHtml(notification) {
       });
 
       const oldestTime = ${oldestTimeEpoch};
+      const criticalAgeMs = 5 * 60 * 1000;
       const updateTime = () => {
         const elapsedMs = Date.now() - oldestTime;
-        const elapsedSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
-        
-        const hours = Math.floor(elapsedSeconds / 3600);
-        const minutes = Math.floor((elapsedSeconds % 3600) / 60);
-        const seconds = elapsedSeconds % 60;
-        
-        let timeStr = '';
-        if (hours > 0) {
-          const totalMinutes = hours * 60 + minutes;
-          timeStr += totalMinutes + ' DAKİKA ' + seconds + ' SANİYE';
-        } else {
-          timeStr += minutes + ' DAKİKA ' + seconds + ' SANİYE';
+        const ageElement = document.getElementById('time-elapsed');
+        ageElement.classList.toggle('request-age--recent', elapsedMs < 60000);
+        ageElement.classList.toggle('request-age--critical', elapsedMs >= criticalAgeMs);
+        if (elapsedMs < 60000) {
+          ageElement.innerText = 'Az önce';
+          return;
         }
-        
-        document.getElementById('time-elapsed').innerText = timeStr;
+
+        const minutes = Math.floor(elapsedMs / 60000);
+        if (minutes < 60) {
+          ageElement.innerText = minutes + ' dk önce';
+          return;
+        }
+
+        const hours = Math.floor(minutes / 60);
+        const remainingMinutes = minutes % 60;
+        ageElement.innerText = remainingMinutes > 0
+          ? hours + ' sa ' + remainingMinutes + ' dk önce'
+          : hours + ' sa önce';
       };
       updateTime();
       setInterval(updateTime, 1000);
@@ -467,6 +542,10 @@ const ICON_BASE64 = "data:image/svg+xml;base64,PHN2ZyBwcmVzZXJ2ZUFzcGVjdFJhdGlvP
 
 function createNativeNotificationService({
   appIconPath,
+  reservationIconUrl = '',
+  housekeepingIconUrl = '',
+  clockIconUrl = '',
+  notificationsIconUrl = '',
   overlayPreloadPath,
   focusApp,
   openInApp,
@@ -502,24 +581,36 @@ function createNativeNotificationService({
 
   function rememberOpenedNotification(payload) {
     recentlyOpenedNotifications.set(payload.id, {
-      signature: buildStableNotificationSignature(payload)
+      signature: buildStableNotificationSignature(payload),
+      openedAt: Date.now()
     });
 
     const fingerprint = buildOpenedNotificationFingerprint(payload);
     if (fingerprint) {
-      recentlyOpenedFingerprints.set(fingerprint, { id: payload.id, category: payload.category });
+      recentlyOpenedFingerprints.set(fingerprint, {
+        id: payload.id,
+        category: payload.category,
+        openedAt: Date.now()
+      });
     }
   }
 
   function shouldSuppressRecentlyOpenedNotification(payload) {
     pruneRecentlyOpenedNotifications();
     const recentRecord = recentlyOpenedNotifications.get(payload.id);
-    if (recentRecord && recentRecord.signature === buildStableNotificationSignature(payload)) {
+    if (
+      recentRecord
+      && Date.now() - recentRecord.openedAt < OPENED_NOTIFICATION_SUPPRESS_MS
+    ) {
       return true;
     }
 
     const fingerprint = buildOpenedNotificationFingerprint(payload);
-    return Boolean(fingerprint && recentlyOpenedFingerprints.has(fingerprint));
+    const fingerprintRecord = fingerprint ? recentlyOpenedFingerprints.get(fingerprint) : null;
+    return Boolean(
+      fingerprintRecord
+      && Date.now() - fingerprintRecord.openedAt < OPENED_NOTIFICATION_SUPPRESS_MS
+    );
   }
 
   function findRecentActiveDuplicate(payload) {
@@ -590,19 +681,23 @@ function createNativeNotificationService({
       id: record.payload.id,
       category: record.payload.category,
       count: record.payload.count,
+      requestId: record.payload.requestId || null,
       acknowledgementKey: record.payload.acknowledgementKey || null
     });
     onNotificationOpened({
       id: record.payload.id,
       category: record.payload.category,
       count: record.payload.count,
+      requestId: record.payload.requestId || null,
       acknowledgementKey: record.payload.acknowledgementKey || null
     });
     emitChange();
     repositionOverlays();
     focusApp();
     if (record.payload.url) {
-      openInApp(record.payload.url);
+      // Deliver the acknowledgement to the React panel before navigation can
+      // replace its renderer state.
+      setTimeout(() => openInApp(record.payload.url), 75);
     }
   }
 
@@ -658,7 +753,13 @@ function createNativeNotificationService({
       }
     });
 
-    overlayWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(buildOverlayHtml(record.payload))}`);
+    overlayWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(buildOverlayHtml({
+      ...record.payload,
+      reservationIconUrl,
+      housekeepingIconUrl,
+      clockIconUrl,
+      notificationsIconUrl
+    }))}`);
     return overlayWindow;
   }
 
@@ -678,8 +779,12 @@ function createNativeNotificationService({
       };
     }
 
+    const existing = activeNotifications.get(normalized.id);
+    const isDetailEnrichment = existing
+      && Boolean(normalized.detailLabel)
+      && normalized.detailLabel !== existing.payload.detailLabel;
     const activeDuplicate = findRecentActiveDuplicate(normalized);
-    if (activeDuplicate) {
+    if (activeDuplicate && !isDetailEnrichment) {
       writeLog('notification duplicate suppressed', {
         id: normalized.id,
         activeId: activeDuplicate.payload.id,
@@ -694,17 +799,9 @@ function createNativeNotificationService({
       };
     }
 
-    const existing = activeNotifications.get(normalized.id);
     if (existing) {
       activeNotifications.delete(normalized.id);
       closeRecord(existing);
-    }
-
-    for (const [activeId, activeRecord] of activeNotifications.entries()) {
-      if (activeRecord.payload.category === normalized.category) {
-        activeNotifications.delete(activeId);
-        closeRecord(activeRecord);
-      }
     }
 
     const record = {
@@ -723,6 +820,7 @@ function createNativeNotificationService({
       id: normalized.id,
       title: normalized.title,
       category: normalized.category,
+      detailLabel: normalized.detailLabel,
       overlay: true,
       native: false,
       sound: soundResult?.played ? 'played' : soundResult?.reason || 'not_played'
@@ -767,7 +865,7 @@ function createNativeNotificationService({
     }
     recentlyOpenedNotifications.delete(notificationId);
     for (const [fingerprint, opened] of recentlyOpenedFingerprints.entries()) {
-      if (opened?.id === notificationId || (normalizedCategory && opened?.category === normalizedCategory)) {
+      if (opened?.id === notificationId) {
         recentlyOpenedFingerprints.delete(fingerprint);
       }
     }
@@ -776,9 +874,58 @@ function createNativeNotificationService({
     repositionOverlays();
   }
 
+  function acknowledgeNotification({ id, category, requestId } = {}) {
+    const notificationId = normalizeText(id);
+    const normalizedCategory = normalizeCategory(category);
+    const normalizedRequestId = normalizeText(requestId);
+    const records = [];
+    const directRecord = activeNotifications.get(notificationId);
+
+    if (directRecord) {
+      records.push(directRecord);
+    }
+
+    for (const record of activeNotifications.values()) {
+      const hasSameRequest = normalizedRequestId
+        && record.payload.requestId === normalizedRequestId;
+      if (record !== directRecord && hasSameRequest) {
+        records.push(record);
+      }
+    }
+
+    if (records.length === 0 && normalizedCategory) {
+      for (const record of activeNotifications.values()) {
+        if (record.payload.category === normalizedCategory) {
+          records.push(record);
+        }
+      }
+    }
+
+    for (const record of records) {
+      activeNotifications.delete(record.payload.id);
+      rememberOpenedNotification(record.payload);
+      closeRecord(record);
+    }
+
+    if (records.length > 0) {
+      stopSound('notification_acknowledged_from_panel');
+      writeLog('notification acknowledged from panel', {
+        id: notificationId || null,
+        category: normalizedCategory || null,
+        requestId: normalizedRequestId || null,
+        dismissedCount: records.length
+      });
+      emitChange();
+      repositionOverlays();
+    }
+
+    return { acknowledged: records.length > 0, dismissedCount: records.length };
+  }
+
   return {
     showNotification,
     dismissNotification,
+    acknowledgeNotification,
     clearAll,
     getState
   };
