@@ -1077,7 +1077,11 @@ function createMainWindow(initialUrl = getStartupUrl()) {
   mainWindow.setMenuBarVisibility(false);
 
   mainWindow.webContents.on('context-menu', (_event, params) => {
+    const hasSelectedText = Boolean(String(params.selectionText || '').trim());
+    // Added selected-text copy because the desktop right-click menu previously exposed only shell actions.
+    // A guest/admin can now copy a selected panel value without relying on the keyboard shortcut.
     const contextMenu = Menu.buildFromTemplate([
+      ...(hasSelectedText ? [{ label: 'Kopyala', role: 'copy' }, { type: 'separator' }] : []),
       {
         label: `Version ${app.getVersion()}`,
         enabled: false
