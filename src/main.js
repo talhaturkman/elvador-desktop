@@ -65,14 +65,15 @@ writeEarlyStartupState({
 });
 
 const { app: earlyApp } = require('electron');
-if (GPU_SAFE_MODE_ENABLED) {
-  earlyApp.disableHardwareAcceleration();
-  earlyApp.commandLine.appendSwitch('disable-gpu');
-  earlyApp.commandLine.appendSwitch('disable-gpu-compositing');
-  earlyApp.commandLine.appendSwitch('disable-gpu-sandbox');
-  earlyApp.commandLine.appendSwitch('disable-software-rasterizer');
-  earlyApp.commandLine.appendSwitch('use-gl', 'swiftshader');
-}
+// The desktop shell only hosts the web panel and native overlays. Keeping GPU
+// acceleration disabled prevents virtualized and legacy Windows GPUs from
+// creating a Chromium shared context during startup.
+earlyApp.disableHardwareAcceleration();
+earlyApp.commandLine.appendSwitch('disable-gpu');
+earlyApp.commandLine.appendSwitch('disable-gpu-compositing');
+earlyApp.commandLine.appendSwitch('disable-gpu-sandbox');
+earlyApp.commandLine.appendSwitch('disable-software-rasterizer');
+earlyApp.commandLine.appendSwitch('use-gl', 'swiftshader');
 earlyApp.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
 function writeEarlyDesktopLog(message, details = null) {
@@ -635,6 +636,30 @@ function focusMainWindow() {
 
   mainWindow.show();
   mainWindow.focus();
+}
+
+function isMainWindowActiveForNotifications() {
+  return Boolean(
+    mainWindow
+    && !mainWindow.isDestroyed()
+    && mainWindow.isVisible()
+    && !mainWindow.isMinimized()
+    && mainWindow.isFocused()
+  );
+}
+
+function dismissNativeOverlaysForActivePanel(reason) {
+  if (!isMainWindowActiveForNotifications()) {
+    return;
+  }
+
+  const activeCount = notificationService?.getState().activeCount || 0;
+  if (activeCount === 0) {
+    return;
+  }
+
+  notificationService.clearAll();
+  writeDesktopLog('native overlays cleared because panel is active', { reason, activeCount });
 }
 
 function getDevToolsWindow(webContents) {
@@ -1228,6 +1253,8 @@ function createMainWindow(initialUrl = getStartupUrl()) {
     mainWindow.hide();
   });
 
+  mainWindow.on('focus', () => dismissNativeOverlaysForActivePanel('window_focus'));
+
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
@@ -1427,9 +1454,16 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle('elvador:acknowledge-native-notification', (_event, payload = {}) => {
-    return notificationService?.acknowledgeNotification(payload) || {
+    const nativeResult = notificationService?.acknowledgeNotification(payload) || {
       acknowledged: false,
       reason: 'notification_service_unavailable'
+    };
+    const pollerResult = pendingPoller?.acknowledgePendingNotification(payload) || {
+      suppressedCount: 0
+    };
+    return {
+      ...nativeResult,
+      suppressedCount: pollerResult.suppressedCount
     };
   });
 
@@ -1500,8 +1534,19 @@ if (!gotSingleInstanceLock) {
       playSound: (options) => notificationSoundService.playNotificationSound(options),
       stopSound: (reason) => notificationSoundService.stopNotificationSound(reason),
       writeLog: writeDesktopLog,
+      shouldShowOverlay: () => !isMainWindowActiveForNotifications(),
       onNotificationOpened: (payload) => {
-        mainWindow?.webContents?.send('elvador:notification-opened', payload);
+        pendingPoller?.acknowledgePendingNotification(payload);
+        // 2026-08-15: Only an overlay click reaches this callback. Mark it as
+        // user-initiated so the panel clears the matching visual alert.
+        mainWindow?.webContents?.send('elvador:notification-opened', {
+          ...payload,
+          userInitiated: true
+        });
+      },
+      onNotificationMinimized: (payload) => {
+        pendingPoller?.acknowledgePendingNotification(payload);
+        mainWindow?.webContents?.send('elvador:notification-minimized', payload);
       },
       onChange: (state) => {
         lastNotificationState = state;

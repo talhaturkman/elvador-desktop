@@ -80,6 +80,7 @@ function createDesktopPendingPoller({
   let previousSources = new Map();
   let previousPendingItemKeys = new Map();
   let lastNotificationAtById = new Map();
+  let acknowledgedPendingIds = new Set();
   let lastError = null;
   let lastPollAt = null;
   let lastTotalPending = 0;
@@ -126,7 +127,7 @@ function createDesktopPendingPoller({
       sourceLabel: copy.sourceLabel,
       sourceInitials: copy.sourceInitials,
       count: 1,
-      oldestRequestedAt: source.oldestRequestedAt,
+      oldestRequestedAt: item?.requestedAt || item?.createdAt || source.oldestRequestedAt,
       roomNumber: item?.roomNumber || null,
       guestName: item?.guestName || null,
       requestId: item?.id || item?.requestId || null,
@@ -178,7 +179,6 @@ function createDesktopPendingPoller({
       const nextPendingItemKeys = new Map();
       const newPendingEntries = [];
       const now = Date.now();
-      let hasNotificationTrigger = false;
       let totalPending = 0;
 
       sources.forEach((source) => {
@@ -199,14 +199,11 @@ function createDesktopPendingPoller({
         nextPendingItemKeys.set(sourceKey, sourceItemKeys);
         totalPending += nextCount;
 
-        if (nextCount > 0 && (!hasCompletedInitialPoll || nextCount > previousCount)) {
-          hasNotificationTrigger = true;
-        }
-
         for (const previousItemKey of previousItemKeys) {
           if (!sourceItemKeys.has(previousItemKey)) {
             dismissNotification({ id: previousItemKey, category: source.category });
             lastNotificationAtById.delete(previousItemKey);
+            acknowledgedPendingIds.delete(previousItemKey);
             writeLog('pending notification resolved', { notificationId: previousItemKey, category: source.category });
           }
         }
@@ -218,6 +215,7 @@ function createDesktopPendingPoller({
           for (const notificationId of previousPendingItemKeys.get(sourceKey) || []) {
             dismissNotification({ id: notificationId, category: previousSource.category });
             lastNotificationAtById.delete(notificationId);
+            acknowledgedPendingIds.delete(notificationId);
             writeLog('pending notification resolved', { notificationId, category: previousSource.category });
           }
         }
@@ -230,9 +228,10 @@ function createDesktopPendingPoller({
         const sourceKey = source.key || `${source.category}:${source.tab}`;
         const notificationId = getPendingItemKey(sourceKey, item, index);
         const lastNotificationAt = lastNotificationAtById.get(notificationId) || 0;
-        return now - lastNotificationAt >= reminderIntervalMs;
+        return !acknowledgedPendingIds.has(notificationId)
+          && now - lastNotificationAt >= reminderIntervalMs;
       });
-      const entriesToShow = hasNotificationTrigger
+      const entriesToShow = newPendingEntries.length > 0
         ? newPendingEntries
         : reminderEntries;
       const reminderDue = reminderEntries.length > 0;
@@ -246,7 +245,7 @@ function createDesktopPendingPoller({
 
       writeLog('pending poll', {
         totalPending,
-        trigger: hasNotificationTrigger ? 'increase_or_initial' : reminderDue ? 'reminder' : 'none',
+        trigger: newPendingEntries.length > 0 ? 'new_request_or_initial' : reminderDue ? 'reminder' : 'none',
         sources: sources.map((source) => ({ key: source.key || `${source.category}:${source.tab}`, category: source.category, count: Number(source.count) || 0 }))
       });
 
@@ -266,6 +265,7 @@ function createDesktopPendingPoller({
         previousSources = new Map();
         previousPendingItemKeys = new Map();
         lastNotificationAtById = new Map();
+        acknowledgedPendingIds = new Set();
         lastTotalPending = 0;
         hasCompletedInitialPoll = false;
       }
@@ -293,6 +293,7 @@ function createDesktopPendingPoller({
       previousSources = new Map();
       previousPendingItemKeys = new Map();
       lastNotificationAtById = new Map();
+      acknowledgedPendingIds = new Set();
       lastTotalPending = 0;
       hasCompletedInitialPoll = false;
     }
@@ -307,6 +308,7 @@ function createDesktopPendingPoller({
     previousSources = new Map();
     previousPendingItemKeys = new Map();
     lastNotificationAtById = new Map();
+    acknowledgedPendingIds = new Set();
     lastTotalPending = 0;
     hasCompletedInitialPoll = false;
     clearTimer();
@@ -325,10 +327,49 @@ function createDesktopPendingPoller({
     };
   }
 
+  function acknowledgePendingNotification({ id, requestId, category } = {}) {
+    const notificationId = String(id || '').trim();
+    const normalizedRequestId = String(requestId || '').trim();
+    const normalizedCategory = String(category || '').trim();
+    const matchedIds = new Set();
+
+    if (notificationId) {
+      matchedIds.add(notificationId);
+    }
+
+    if (normalizedRequestId) {
+      for (const [sourceKey, itemKeys] of previousPendingItemKeys.entries()) {
+        const source = previousSources.get(sourceKey);
+        if (normalizedCategory && source?.category !== normalizedCategory) {
+          continue;
+        }
+        for (const itemKey of itemKeys) {
+          if (itemKey.endsWith(`:${normalizedRequestId}`)) {
+            matchedIds.add(itemKey);
+          }
+        }
+      }
+    }
+
+    for (const matchedId of matchedIds) {
+      acknowledgedPendingIds.add(matchedId);
+    }
+
+    if (matchedIds.size > 0) {
+      writeLog('pending notification reminders suppressed after acknowledgement', {
+        notificationIds: Array.from(matchedIds),
+        category: normalizedCategory || null
+      });
+    }
+
+    return { suppressedCount: matchedIds.size };
+  }
+
   return {
     start,
     stop,
     poll,
+    acknowledgePendingNotification,
     getState
   };
 }

@@ -1,10 +1,11 @@
 const { BrowserWindow, ipcMain, screen } = require('electron');
 
-const OVERLAY_WIDTH = 390;
+const OVERLAY_WIDTH = 320;
 const OVERLAY_HEIGHT = 190;
 const OVERLAY_MARGIN = 16;
 const OVERLAY_GAP = 10;
 const OVERLAY_CHANNEL_OPEN = 'elvador:overlay-notification-open';
+const OVERLAY_CHANNEL_MINIMIZE = 'elvador:overlay-notification-minimize';
 const ACTIVE_DUPLICATE_SUPPRESS_MS = 45000;
 const OPENED_NOTIFICATION_SUPPRESS_MS = 45000;
 const DEFAULT_NOTIFICATION_SOUND_OPTIONS = Object.freeze({
@@ -419,7 +420,7 @@ function buildOverlayHtml(notification) {
         border: 1px solid rgba(255, 255, 255, 0.18);
         box-shadow: 0 4px 14px rgba(220, 38, 38, 0.25), 0 2px 6px rgba(0, 0, 0, 0.1);
         cursor: pointer;
-        animation: notification-spawn 1150ms cubic-bezier(0.16, 1, 0.3, 1) both, notification-attention 1.2s ease-in-out 1150ms infinite;
+        animation: notification-spawn 1150ms cubic-bezier(0.16, 1, 0.3, 1) both;
       }
       .headline {
         display: flex;
@@ -439,6 +440,22 @@ function buildOverlayHtml(notification) {
         text-overflow: ellipsis;
         flex: 1;
       }
+      .minimize-button {
+        width: 40px;
+        height: 40px;
+        padding: 0;
+        border: 0;
+        border-radius: 50%;
+        background: transparent;
+        color: #ffffff;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 40px;
+        transition: background 160ms ease;
+      }
+      .minimize-button:hover, .minimize-button:focus-visible { background: rgba(255, 255, 255, 0.2); outline: none; }
       .divider { height: 1px; width: 100%; background: #ffffff; }
       .request-card {
         flex: 1;
@@ -470,10 +487,6 @@ function buildOverlayHtml(notification) {
         from { opacity: 0; translate: 0 calc(100vh + 32px); }
         to { opacity: 1; translate: 0 0; }
       }
-      @keyframes notification-attention {
-        0%, 100% { opacity: 0; }
-        50% { opacity: 1; }
-      }
     </style>
   </head>
   <body>
@@ -485,6 +498,9 @@ function buildOverlayHtml(notification) {
             : '<svg viewBox="0 0 24 24" fill="none" width="24" height="24" stroke-width="2.1"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg>'}
         </span>
         <span class="title">${displayTitle}</span>
+        <button class="minimize-button" type="button" aria-label="Merkez bildirime küçült">
+          <svg viewBox="0 0 24 24" fill="none" width="26" height="26" stroke="currentColor" stroke-width="2.7"><path d="m6 6 12 12M18 6 6 18"/></svg>
+        </button>
       </div>
       <div class="divider" aria-hidden="true"></div>
       <div class="request-card">
@@ -502,7 +518,13 @@ function buildOverlayHtml(notification) {
     </main>
     <script>
       const open = () => window.elvadorOverlay.open("${id}");
+      const minimize = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        window.elvadorOverlay.minimize("${id}");
+      };
       document.body.addEventListener('click', open);
+      document.querySelector('.minimize-button').addEventListener('click', minimize);
       document.body.addEventListener('keydown', (event) => {
         if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); }
       });
@@ -552,12 +574,15 @@ function createNativeNotificationService({
   playSound = () => ({ played: false, reason: 'sound_service_unavailable' }),
   stopSound = () => {},
   writeLog = () => {},
+  shouldShowOverlay = () => true,
   onNotificationOpened = () => {},
+  onNotificationMinimized = () => {},
   onChange = () => {}
 }) {
   const activeNotifications = new Map();
   const recentlyOpenedNotifications = new Map();
   const recentlyOpenedFingerprints = new Map();
+  const minimizedNotificationIds = new Set();
 
   function emitChange() {
     onChange({
@@ -706,6 +731,31 @@ function createNativeNotificationService({
     openNotification(String(notificationId || ''));
   });
 
+  ipcMain.removeAllListeners(OVERLAY_CHANNEL_MINIMIZE);
+  ipcMain.on(OVERLAY_CHANNEL_MINIMIZE, (_event, notificationId) => {
+    const record = activeNotifications.get(String(notificationId || ''));
+    if (!record) {
+      return;
+    }
+
+    activeNotifications.delete(record.payload.id);
+    closeRecord(record);
+    minimizedNotificationIds.add(record.payload.id);
+    stopSound('notification_minimized_to_panel');
+    writeLog('notification minimized to panel', {
+      id: record.payload.id,
+      category: record.payload.category,
+      requestId: record.payload.requestId || null
+    });
+    onNotificationMinimized({
+      id: record.payload.id,
+      category: record.payload.category,
+      requestId: record.payload.requestId || null
+    });
+    emitChange();
+    repositionOverlays();
+  });
+
   function createOverlayWindow(record) {
     const overlayWindow = new BrowserWindow({
       width: OVERLAY_WIDTH,
@@ -766,6 +816,17 @@ function createNativeNotificationService({
   function showNotification(payload = {}) {
     const normalized = sanitizeNotificationPayload(payload);
     normalized._iconDataUrl = ICON_BASE64;
+    if (minimizedNotificationIds.has(normalized.id)) {
+      writeLog('notification suppressed after minimize to panel', {
+        id: normalized.id,
+        category: normalized.category
+      });
+      return {
+        shown: false,
+        id: normalized.id,
+        reason: 'minimized_to_panel'
+      };
+    }
     if (shouldSuppressRecentlyOpenedNotification(normalized)) {
       writeLog('notification suppressed after open', {
         id: normalized.id,
@@ -776,6 +837,24 @@ function createNativeNotificationService({
         shown: false,
         id: normalized.id,
         reason: 'recently_opened'
+      };
+    }
+
+    if (!shouldShowOverlay(normalized)) {
+      const soundResult = normalized.playSound
+        ? playSound(buildNotificationSoundOptions(normalized, payload))
+        : { played: false, reason: 'disabled_for_payload' };
+      writeLog('notification kept in visible panel', {
+        id: normalized.id,
+        category: normalized.category,
+        detailLabel: normalized.detailLabel,
+        sound: soundResult?.played ? 'played' : soundResult?.reason || 'not_played'
+      });
+      return {
+        shown: false,
+        id: normalized.id,
+        reason: 'panel_visible',
+        overlay: false
       };
     }
 
@@ -802,6 +881,22 @@ function createNativeNotificationService({
     if (existing) {
       activeNotifications.delete(normalized.id);
       closeRecord(existing);
+    }
+
+    // A category is one desktop attention lane. When a newer request arrives
+    // for the same lane, keep its overlay current instead of stacking stale
+    // cards from that category in the bottom-right corner.
+    for (const record of activeNotifications.values()) {
+      if (record.payload.category !== normalized.category) {
+        continue;
+      }
+      activeNotifications.delete(record.payload.id);
+      closeRecord(record);
+      writeLog('notification category overlay replaced', {
+        previousId: record.payload.id,
+        nextId: normalized.id,
+        category: normalized.category
+      });
     }
 
     const record = {
@@ -863,6 +958,7 @@ function createNativeNotificationService({
       activeNotifications.delete(notificationId);
       closeRecord(record);
     }
+    minimizedNotificationIds.delete(notificationId);
     recentlyOpenedNotifications.delete(notificationId);
     for (const [fingerprint, opened] of recentlyOpenedFingerprints.entries()) {
       if (opened?.id === notificationId) {

@@ -16,6 +16,8 @@ const pendingDirectDetailPayloads = new Map();
 let lastPanelDetailEnrichmentSignature = '';
 const pendingNotificationOpenedPayloads = [];
 let notificationOpenedListenerCount = 0;
+const pendingNotificationMinimizedPayloads = [];
+let notificationMinimizedListenerCount = 0;
 
 function traceDesktopNotification(event, details = {}) {
   console.info('[DESKTOP_NOTIFICATION_TRACE]', {
@@ -367,6 +369,10 @@ function enrichQueuedDirectNotifications() {
 }
 
 function syncVisibleServiceDetailToNativeNotification() {
+  if (isPanelFallbackSuppressedByDirectBridge()) {
+    return;
+  }
+
   const context = getPanelVisualNotificationContext();
   const item = context?.items?.length === 1 ? context.items[0] : null;
   const category = normalizePayloadCategory(item?.category);
@@ -578,6 +584,25 @@ function onNotificationOpened(listener) {
   };
 }
 
+function onNotificationMinimized(listener) {
+  if (typeof listener !== 'function') {
+    return () => {};
+  }
+
+  const handler = (event) => listener(event.detail || {});
+  window.addEventListener('elvador-notification-minimized', handler);
+  notificationMinimizedListenerCount += 1;
+
+  while (pendingNotificationMinimizedPayloads.length > 0) {
+    listener(pendingNotificationMinimizedPayloads.shift());
+  }
+
+  return () => {
+    window.removeEventListener('elvador-notification-minimized', handler);
+    notificationMinimizedListenerCount = Math.max(0, notificationMinimizedListenerCount - 1);
+  };
+}
+
 ipcRenderer.on('elvador:notification-opened', (_event, payload = {}) => {
   const detail = payload && typeof payload === 'object' ? payload : {};
   traceDesktopNotification('native_notification_opened_delivered', {
@@ -589,6 +614,19 @@ ipcRenderer.on('elvador:notification-opened', (_event, payload = {}) => {
     pendingNotificationOpenedPayloads.push(detail);
   }
   window.dispatchEvent(new CustomEvent('elvador-notification-opened', { detail }));
+});
+
+ipcRenderer.on('elvador:notification-minimized', (_event, payload = {}) => {
+  const detail = payload && typeof payload === 'object' ? payload : {};
+  traceDesktopNotification('native_notification_minimized_delivered', {
+    id: detail.id || null,
+    category: detail.category || null,
+    requestId: detail.requestId || null
+  });
+  if (notificationMinimizedListenerCount === 0) {
+    pendingNotificationMinimizedPayloads.push(detail);
+  }
+  window.dispatchEvent(new CustomEvent('elvador-notification-minimized', { detail }));
 });
 
 function reportNotificationReadState(details = {}) {
@@ -635,6 +673,7 @@ contextBridge.exposeInMainWorld('elvadorDesktop', {
   stopNotificationSound: stopNotificationSoundFromPage,
   acknowledgeNativeNotification: acknowledgeNativeNotificationFromPage,
   onNotificationOpened,
+  onNotificationMinimized,
   reportNotificationReadState
 });
 
