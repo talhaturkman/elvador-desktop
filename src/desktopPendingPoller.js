@@ -7,6 +7,7 @@ const CATEGORY_COPY = {
   housekeeping: { title: 'Kat Hizmetleri Bildirimi', label: 'kat hizmetleri talebi', sourceLabel: 'Kat Hizmeti', sourceInitials: 'HK' },
   technic: { title: 'Teknik Bildirimi', label: 'teknik talep', sourceLabel: 'Teknik', sourceInitials: 'TK' },
   orders: { title: 'Sipariş Bildirimi', label: 'sipariş talebi', sourceLabel: 'Sipariş', sourceInitials: 'SP' },
+  ordersReservations: { title: 'Masa Rezervasyonu Bildirimi', label: 'masa rezervasyonu', sourceLabel: 'Yemek Rez.', sourceInitials: 'MR' },
   upsell: { title: 'Upsell Bildirimi', label: 'upsell talebi', sourceLabel: 'Upsell', sourceInitials: 'UP' },
   spa: { title: 'Spa Bildirimi', label: 'spa talebi', sourceLabel: 'Spa', sourceInitials: 'SP' },
   lostAndFound: { title: 'Kayıp Eşya Bildirimi', label: 'kayıp eşya talebi', sourceLabel: 'Kayıp Eşya', sourceInitials: 'KE' },
@@ -59,6 +60,36 @@ function buildServiceDetailLabel(item, category) {
     ? formatHousekeepingSubject(rawSubject)
     : rawSubject;
   return serviceSubject;
+}
+
+function getReservationGuestName(item) {
+  const directName = String(
+    item?.guestName
+    || item?.fullName
+    || item?.customerName
+    || item?.guest?.fullName
+    || item?.guest?.guestName
+    || item?.guest?.name
+    || item?.customer?.fullName
+    || item?.customer?.name
+    || item?.reservation?.guestName
+    || item?.reservation?.fullName
+    || item?.restaurantReservation?.guestName
+    || item?.restaurantReservation?.fullName
+    || ''
+  ).trim();
+  if (directName) {
+    return directName;
+  }
+
+  const summary = String(
+    item?.notificationSummary
+    || item?.translatedMessage
+    || item?.message
+    || item?.description
+    || ''
+  );
+  return String(summary.match(/(?:^|\||\s)(?:name=|Guest:\s*)([^|\r\n]+)/i)?.[1] || '').trim();
 }
 
 function createDesktopPendingPoller({
@@ -129,7 +160,9 @@ function createDesktopPendingPoller({
       count: 1,
       oldestRequestedAt: item?.requestedAt || item?.createdAt || source.oldestRequestedAt,
       roomNumber: item?.roomNumber || null,
-      guestName: item?.guestName || null,
+      guestName: ['reservation', 'ordersReservations'].includes(source.category)
+        ? getReservationGuestName(item)
+        : item?.guestName || null,
       requestId: item?.id || item?.requestId || null,
       detailLabel: buildServiceDetailLabel(item, source.category),
       reservationLocation: item?.reservationLocation || null,
