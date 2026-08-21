@@ -1,6 +1,6 @@
 {
   "name": "elvador-desktop",
-  "version": "0.25.35",
+  "version": "0.25.36",
   "private": true,
   "description": "Elvador Windows desktop shell and native notification engine",
   "author": "Elvador",

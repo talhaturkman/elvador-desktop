@@ -80,7 +80,7 @@ async function renderDesktopIconPng(size) {
 async function renderTaskbarIconPng(size) {
   // 2026-08-21: Windows taskbar and tray need the white ring mark with no tile
   // behind it; the desktop shortcut keeps the black-on-white version for contrast.
-  return renderCroppedLogoPng(taskbarSourceSvgPath, size, 1.18);
+  return renderCroppedLogoPng(taskbarSourceSvgPath, size, 1.34);
 }
 
 async function writeIconSet({ outputPngPath, outputIcoPath, renderIcon }) {
