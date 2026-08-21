@@ -861,7 +861,22 @@ function createNativeNotificationService({
     const existing = activeNotifications.get(normalized.id);
     const isDetailEnrichment = existing
       && Boolean(normalized.detailLabel)
-      && normalized.detailLabel !== existing.payload.detailLabel;
+      && normalized.detailLabel !== existing.payload.detailLabel
+      && payload?.bridgeSource === 'page-direct-detail-enrichment';
+    if (existing && !isDetailEnrichment) {
+      writeLog('notification duplicate suppressed', {
+        id: normalized.id,
+        activeId: existing.payload.id,
+        category: normalized.category,
+        count: normalized.count,
+        reason: 'active_notification_id'
+      });
+      return {
+        shown: false,
+        id: normalized.id,
+        reason: 'active_notification_id'
+      };
+    }
     const activeDuplicate = findRecentActiveDuplicate(normalized);
     if (activeDuplicate && !isDetailEnrichment) {
       writeLog('notification duplicate suppressed', {

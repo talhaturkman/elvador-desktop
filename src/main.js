@@ -1450,6 +1450,9 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle('elvador:show-native-notification', (_event, payload = {}) => {
+    if (payload?.bridgeSource === 'page-direct') {
+      pendingPoller?.registerDirectNotification(payload);
+    }
     return notificationService.showNotification(payload);
   });
 

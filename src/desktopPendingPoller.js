@@ -1,5 +1,6 @@
 const DEFAULT_POLL_INTERVAL_MS = 15000;
 const DEFAULT_REMINDER_INTERVAL_MS = 300000;
+const PAGE_DIRECT_DEDUPLICATION_MS = 45000;
 
 const CATEGORY_COPY = {
   liveSupport: { title: 'Destek Bildirimi', label: 'destek talebi', sourceLabel: 'Destek', sourceInitials: 'DS' },
@@ -111,6 +112,7 @@ function createDesktopPendingPoller({
   let previousSources = new Map();
   let previousPendingItemKeys = new Map();
   let lastNotificationAtById = new Map();
+  let recentlyDirectNotifiedAtById = new Map();
   let acknowledgedPendingIds = new Set();
   let lastError = null;
   let lastPollAt = null;
@@ -146,6 +148,14 @@ function createDesktopPendingPoller({
       void poll();
     }, delayMs);
     emitState();
+  }
+
+  function pruneRecentlyDirectNotified(now = Date.now()) {
+    for (const [notificationId, notifiedAt] of recentlyDirectNotifiedAtById.entries()) {
+      if (now - notifiedAt > PAGE_DIRECT_DEDUPLICATION_MS) {
+        recentlyDirectNotifiedAtById.delete(notificationId);
+      }
+    }
   }
 
   function makeNotification(source, item, totalBrand) {
@@ -211,7 +221,9 @@ function createDesktopPendingPoller({
       const nextSources = new Map();
       const nextPendingItemKeys = new Map();
       const newPendingEntries = [];
+      const directBridgeSuppressedIds = [];
       const now = Date.now();
+      pruneRecentlyDirectNotified(now);
       let totalPending = 0;
 
       sources.forEach((source) => {
@@ -225,8 +237,16 @@ function createDesktopPendingPoller({
         (Array.isArray(source.items) ? source.items : []).forEach((item, index) => {
           const itemKey = getPendingItemKey(sourceKey, item, index);
           sourceItemKeys.add(itemKey);
-          if (!hasCompletedInitialPoll || !previousItemKeys.has(itemKey)) {
+          const directlyNotifiedAt = recentlyDirectNotifiedAtById.get(itemKey) || 0;
+          const recentlyNotifiedByPage = now - directlyNotifiedAt <= PAGE_DIRECT_DEDUPLICATION_MS;
+          if (hasCompletedInitialPoll && !previousItemKeys.has(itemKey) && !recentlyNotifiedByPage) {
             newPendingEntries.push({ source, item, index });
+          } else if (hasCompletedInitialPoll && !previousItemKeys.has(itemKey) && recentlyNotifiedByPage) {
+            // 2026-08-21: The panel bridge and native poller can observe one request seconds apart.
+            // Preserve the first desktop alert; treating the poll result as new caused a second
+            // bottom-right reservation overlay for the same request ID.
+            directBridgeSuppressedIds.push(itemKey);
+            lastNotificationAtById.set(itemKey, directlyNotifiedAt);
           }
         });
         nextPendingItemKeys.set(sourceKey, sourceItemKeys);
@@ -264,13 +284,21 @@ function createDesktopPendingPoller({
         return !acknowledgedPendingIds.has(notificationId)
           && now - lastNotificationAt >= reminderIntervalMs;
       });
-      const entriesToShow = newPendingEntries.length > 0
-        ? newPendingEntries
-        : reminderEntries;
       const reminderDue = reminderEntries.length > 0;
-      if (entriesToShow.length > 0) {
-        showPendingNotifications(entriesToShow, payload.brand || brand);
-        entriesToShow.forEach(({ source, item, index = 0 }) => {
+      if (newPendingEntries.length > 0) {
+        showPendingNotifications(newPendingEntries, payload.brand || brand);
+        newPendingEntries.forEach(({ source, item, index = 0 }) => {
+          const sourceKey = source.key || `${source.category}:${source.tab}`;
+          lastNotificationAtById.set(getPendingItemKey(sourceKey, item, index), now);
+        });
+      }
+
+      if (reminderDue) {
+        // 2026-08-21: A reminder belongs to the panel's single sound path.
+        // The desktop poller used to turn the same pending request into a second
+        // chime plus a new bottom-right overlay; it now records the candidate
+        // only, so cards are reserved for requests that are newly observed.
+        reminderEntries.forEach(({ source, item, index = 0 }) => {
           const sourceKey = source.key || `${source.category}:${source.tab}`;
           lastNotificationAtById.set(getPendingItemKey(sourceKey, item, index), now);
         });
@@ -278,8 +306,11 @@ function createDesktopPendingPoller({
 
       writeLog('pending poll', {
         totalPending,
-        trigger: newPendingEntries.length > 0 ? 'new_request_or_initial' : reminderDue ? 'reminder' : 'none',
-        sources: sources.map((source) => ({ key: source.key || `${source.category}:${source.tab}`, category: source.category, count: Number(source.count) || 0 }))
+        trigger: newPendingEntries.length > 0 ? 'new_request' : reminderDue ? 'reminder_panel_only' : 'none',
+        sources: sources.map((source) => ({ key: source.key || `${source.category}:${source.tab}`, category: source.category, count: Number(source.count) || 0 })),
+        newPendingIds: newPendingEntries.map(({ source, item, index }) => getPendingItemKey(source.key || `${source.category}:${source.tab}`, item, index)),
+        reminderIds: reminderEntries.map(({ source, item, index }) => getPendingItemKey(source.key || `${source.category}:${source.tab}`, item, index)),
+        directBridgeSuppressedIds
       });
 
       previousCounts = nextCounts;
@@ -398,11 +429,25 @@ function createDesktopPendingPoller({
     return { suppressedCount: matchedIds.size };
   }
 
+  function registerDirectNotification({ id, requestId } = {}) {
+    const notificationId = String(id || requestId || '').trim();
+    if (!notificationId) {
+      return { registered: false, reason: 'notification_id_missing' };
+    }
+
+    const notifiedAt = Date.now();
+    pruneRecentlyDirectNotified(notifiedAt);
+    recentlyDirectNotifiedAtById.set(notificationId, notifiedAt);
+    writeLog('pending poller direct bridge registered', { notificationId });
+    return { registered: true, notificationId };
+  }
+
   return {
     start,
     stop,
     poll,
     acknowledgePendingNotification,
+    registerDirectNotification,
     getState
   };
 }
