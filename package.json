@@ -1,6 +1,6 @@
 {
   "name": "elvador-desktop",
-  "version": "0.25.34",
+  "version": "0.25.35",
   "private": true,
   "description": "Elvador Windows desktop shell and native notification engine",
   "author": "Elvador",
@@ -40,6 +40,14 @@
       {
         "from": "assets/icon-512.png",
         "to": "icon-512.png"
+      },
+      {
+        "from": "assets/taskbar-icon.ico",
+        "to": "taskbar-icon.ico"
+      },
+      {
+        "from": "assets/taskbar-icon.png",
+        "to": "taskbar-icon.png"
       }
     ],
     "publish": {

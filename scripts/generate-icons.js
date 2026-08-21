@@ -4,9 +4,12 @@ const sharp = require('sharp');
 
 const repoRoot = path.resolve(__dirname, '..');
 const assetsPath = path.join(repoRoot, 'assets');
-const sourceSvgPath = path.join(assetsPath, 'elvador-icon.svg');
-const outputPngPath = path.join(assetsPath, 'icon-512.png');
-const outputIcoPath = path.join(assetsPath, 'icon.ico');
+const desktopSourceSvgPath = path.join(assetsPath, 'elvador-icon.svg');
+const taskbarSourceSvgPath = path.join(assetsPath, 'elvador-logo.svg');
+const desktopOutputPngPath = path.join(assetsPath, 'icon-512.png');
+const desktopOutputIcoPath = path.join(assetsPath, 'icon.ico');
+const taskbarOutputPngPath = path.join(assetsPath, 'taskbar-icon.png');
+const taskbarOutputIcoPath = path.join(assetsPath, 'taskbar-icon.ico');
 const iconSizes = [16, 24, 32, 48, 64, 128, 256];
 
 function createIcoBuffer(images) {
@@ -38,31 +41,72 @@ function createIcoBuffer(images) {
   return icoBuffer;
 }
 
-async function renderIconPng(size) {
+async function renderCroppedLogoPng(sourceSvgPath, size, zoom = 1.24) {
+  const renderSize = Math.round(size * zoom);
+  const cropOffset = Math.round((renderSize - size) / 2);
   return sharp(sourceSvgPath, { density: 384 })
-    .resize(size, size, {
+    .resize(renderSize, renderSize, {
       fit: 'contain',
-      background: '#000000'
+      background: { r: 0, g: 0, b: 0, alpha: 0 }
     })
+    .ensureAlpha()
+    .extract({ left: cropOffset, top: cropOffset, width: size, height: size })
     .png()
     .toBuffer();
 }
 
-async function main() {
-  const png512 = await renderIconPng(512);
-  fs.writeFileSync(outputPngPath, png512);
+async function renderDesktopIconPng(size) {
+  const badgeInset = Math.max(1, Math.round(size * 0.035));
+  const badgeSize = size - (badgeInset * 2);
+  const cornerRadius = Math.max(2, Math.round(badgeSize * 0.22));
+  const badgeSvg = Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><rect x="${badgeInset}" y="${badgeInset}" width="${badgeSize}" height="${badgeSize}" rx="${cornerRadius}" fill="#ffffff"/></svg>`
+  );
+  const logoPng = await renderCroppedLogoPng(desktopSourceSvgPath, size);
 
+  return sharp({
+    create: {
+      width: size,
+      height: size,
+      channels: 4,
+      background: { r: 0, g: 0, b: 0, alpha: 0 }
+    }
+  })
+    .composite([{ input: badgeSvg }, { input: logoPng }])
+    .png()
+    .toBuffer();
+}
+
+async function renderTaskbarIconPng(size) {
+  // 2026-08-21: Windows taskbar and tray need the white ring mark with no tile
+  // behind it; the desktop shortcut keeps the black-on-white version for contrast.
+  return renderCroppedLogoPng(taskbarSourceSvgPath, size, 1.18);
+}
+
+async function writeIconSet({ outputPngPath, outputIcoPath, renderIcon }) {
+  fs.writeFileSync(outputPngPath, await renderIcon(512));
   const icoImages = [];
   for (const size of iconSizes) {
-    icoImages.push({
-      size,
-      buffer: await renderIconPng(size)
-    });
+    icoImages.push({ size, buffer: await renderIcon(size) });
   }
-
   fs.writeFileSync(outputIcoPath, createIcoBuffer(icoImages));
-  console.log(`Wrote ${path.relative(repoRoot, outputPngPath)}`);
-  console.log(`Wrote ${path.relative(repoRoot, outputIcoPath)}`);
+}
+
+async function main() {
+  await writeIconSet({
+    outputPngPath: desktopOutputPngPath,
+    outputIcoPath: desktopOutputIcoPath,
+    renderIcon: renderDesktopIconPng
+  });
+  await writeIconSet({
+    outputPngPath: taskbarOutputPngPath,
+    outputIcoPath: taskbarOutputIcoPath,
+    renderIcon: renderTaskbarIconPng
+  });
+  console.log(`Wrote ${path.relative(repoRoot, desktopOutputPngPath)}`);
+  console.log(`Wrote ${path.relative(repoRoot, desktopOutputIcoPath)}`);
+  console.log(`Wrote ${path.relative(repoRoot, taskbarOutputPngPath)}`);
+  console.log(`Wrote ${path.relative(repoRoot, taskbarOutputIcoPath)}`);
 }
 
 main().catch((error) => {

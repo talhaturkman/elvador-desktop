@@ -45,7 +45,7 @@ function getDesktopConfig() {
   return {
     adminUrl,
     apiBaseUrl: normalizeApiBaseUrl(process.env.ELVADOR_API_BASE_URL, adminUrl),
-    appUserModelId: process.env.ELVADOR_APP_USER_MODEL_ID || 'com.elvador.desktop',
+    appUserModelId: process.env.ELVADOR_APP_USER_MODEL_ID || 'com.elvador.desktop.brandmark',
     autoStartEnabled: process.env.ELVADOR_AUTO_START !== 'false',
     notificationReminderMs: normalizePositiveInteger(
       process.env.ELVADOR_NOTIFICATION_REMINDER_MS,

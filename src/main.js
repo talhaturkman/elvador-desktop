@@ -505,11 +505,11 @@ process.on('unhandledRejection', (error) => {
 });
 
 function getAppIconPath() {
-  const packagedIconPath = path.join(process.resourcesPath || '', 'icon.ico');
-  const repoIconPath = path.join(__dirname, '..', 'assets', 'icon.ico');
-  const fallbackPath = path.join(__dirname, '..', 'assets', 'icon-512.png');
+  const packagedIconPath = path.join(process.resourcesPath || '', 'taskbar-icon.ico');
+  const repoIconPath = path.join(__dirname, '..', 'assets', 'taskbar-icon.ico');
+  const fallbackPath = path.join(__dirname, '..', 'assets', 'taskbar-icon.png');
   if (app.isPackaged) {
-    return fs.existsSync(packagedIconPath) ? packagedIconPath : path.join(process.resourcesPath || '', 'icon-512.png');
+    return fs.existsSync(packagedIconPath) ? packagedIconPath : path.join(process.resourcesPath || '', 'taskbar-icon.png');
   }
   return fs.existsSync(repoIconPath) ? repoIconPath : fallbackPath;
 }
