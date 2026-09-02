@@ -20,11 +20,17 @@ const pendingNotificationMinimizedPayloads = [];
 let notificationMinimizedListenerCount = 0;
 
 function traceDesktopNotification(event, details = {}) {
-  console.info('[DESKTOP_NOTIFICATION_TRACE]', {
+  const entry = {
     event,
     at: new Date().toISOString(),
     ...details
-  });
+  };
+  console.info('[DESKTOP_NOTIFICATION_TRACE]', entry);
+  try {
+    ipcRenderer.send('elvador:notification-trace', event, details);
+  } catch (_) {
+    // The main-process trace is diagnostic-only and cannot disrupt the panel bridge.
+  }
 }
 
 function readStorageValue(storage, key) {

@@ -3,6 +3,7 @@ const fs = require('fs');
 
 const earlyLogDirectory = path.join(process.env.APPDATA || process.cwd(), 'Elvador');
 const earlyLogFilePath = path.join(earlyLogDirectory, 'desktop.log');
+const notificationTraceFilePath = path.join(earlyLogDirectory, 'desktop-notification-trace.log');
 const startupStatePath = path.join(earlyLogDirectory, 'desktop-startup-state.json');
 const STARTUP_AUTO_SAFE_MODE_WINDOW_MS = 10 * 60 * 1000;
 
@@ -161,6 +162,24 @@ function writeDesktopLog(message, details = null) {
     fs.appendFileSync(logFilePath, `[${new Date().toISOString()}] ${message}${detailText}\n`);
   } catch (_) {
     // Logging must never break app startup.
+  }
+}
+
+// 2026-08-21: Added a local-only notification trace so duplicate/reminder reports can be
+// correlated across the panel bridge, native poller, overlay and window focus without F12.
+function writeNotificationTrace(event, details = {}) {
+  try {
+    fs.mkdirSync(logDirectory, { recursive: true });
+    const entry = {
+      at: new Date().toISOString(),
+      pid: process.pid,
+      event,
+      ...details
+    };
+    fs.appendFileSync(notificationTraceFilePath, `${JSON.stringify(entry)}\n`);
+    writeDesktopLog('notification_trace', entry);
+  } catch (_) {
+    // Observation logging must never interrupt native notification delivery.
   }
 }
 
@@ -373,7 +392,7 @@ function getCurrentMainWindowState() {
     minimized: mainWindow.isMinimized(),
     focused: mainWindow.isFocused(),
     bounds,
-    url: webContents.getURL(),
+    url: redactUrlToken(webContents.getURL()),
     devToolsOpened: webContents.isDevToolsOpened(),
     devToolsWindow: getDevToolsWindowState(webContents),
     crashed: typeof webContents.isCrashed === 'function' ? webContents.isCrashed() : false
@@ -418,6 +437,7 @@ function buildDiagnosticsReport() {
     developerShortcutState,
     lastDevToolsRequestAt,
     logFilePath,
+    notificationTraceFilePath,
     settingsPath,
     settingsFileExists: settingsPath ? fs.existsSync(settingsPath) : false
   };
@@ -467,6 +487,23 @@ function openDesktopLogFile() {
     });
   } catch (error) {
     writeDesktopLog('desktop_log_open_error', { message: error?.message });
+  }
+}
+
+function openNotificationTraceLogFile() {
+  try {
+    fs.mkdirSync(path.dirname(notificationTraceFilePath), { recursive: true });
+    if (!fs.existsSync(notificationTraceFilePath)) {
+      fs.writeFileSync(notificationTraceFilePath, '', 'utf8');
+    }
+    shell.openPath(notificationTraceFilePath).then((errorMessage) => {
+      if (errorMessage) {
+        writeDesktopLog('notification_trace_open_error', { message: errorMessage });
+        shell.showItemInFolder(notificationTraceFilePath);
+      }
+    });
+  } catch (error) {
+    writeDesktopLog('notification_trace_open_error', { message: error?.message });
   }
 }
 
@@ -1103,10 +1140,15 @@ function createMainWindow(initialUrl = getStartupUrl()) {
 
   mainWindow.webContents.on('context-menu', (_event, params) => {
     const hasSelectedText = Boolean(String(params.selectionText || '').trim());
-    // Added selected-text copy because the desktop right-click menu previously exposed only shell actions.
-    // A guest/admin can now copy a selected panel value without relying on the keyboard shortcut.
+    const canPaste = Boolean(params.isEditable && params.editFlags?.canPaste);
+    const editActions = [
+      ...(hasSelectedText ? [{ label: 'Kopyala', role: 'copy' }] : []),
+      ...(canPaste ? [{ label: 'Yapıştır', role: 'paste' }] : [])
+    ];
+    // Added copy and paste because the desktop right-click menu previously exposed only shell actions.
+    // An admin can now paste a token or link into a panel field without relying on the keyboard shortcut.
     const contextMenu = Menu.buildFromTemplate([
-      ...(hasSelectedText ? [{ label: 'Kopyala', role: 'copy' }, { type: 'separator' }] : []),
+      ...(editActions.length > 0 ? [...editActions, { type: 'separator' }] : []),
       {
         label: `Version ${app.getVersion()}`,
         enabled: false
@@ -1147,6 +1189,10 @@ function createMainWindow(initialUrl = getStartupUrl()) {
       {
         label: 'Log Dosyasini Ac',
         click: () => openDesktopLogFile()
+      },
+      {
+        label: 'Bildirim Izleme Logunu Ac',
+        click: () => openNotificationTraceLogFile()
       },
       { type: 'separator' },
       {
@@ -1230,6 +1276,18 @@ function createMainWindow(initialUrl = getStartupUrl()) {
     }
   });
 
+  mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    if (!String(message || '').includes('[DESKTOP_NOTIFICATION_TRACE]')) {
+      return;
+    }
+    writeNotificationTrace('renderer_console_trace', {
+      level,
+      message: String(message || ''),
+      line,
+      sourceId
+    });
+  });
+
   mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedUrl, isMainFrame) => {
     if (!isMainFrame || errorCode === -3) {
       return;
@@ -1250,12 +1308,22 @@ function createMainWindow(initialUrl = getStartupUrl()) {
     }
 
     event.preventDefault();
+    writeNotificationTrace('main_window_close_to_tray', getCurrentMainWindowState());
     mainWindow.hide();
   });
 
-  mainWindow.on('focus', () => dismissNativeOverlaysForActivePanel('window_focus'));
+  mainWindow.on('focus', () => {
+    writeNotificationTrace('main_window_focus', getCurrentMainWindowState());
+    dismissNativeOverlaysForActivePanel('window_focus');
+  });
+  mainWindow.on('blur', () => writeNotificationTrace('main_window_blur', getCurrentMainWindowState()));
+  mainWindow.on('show', () => writeNotificationTrace('main_window_show', getCurrentMainWindowState()));
+  mainWindow.on('hide', () => writeNotificationTrace('main_window_hide', getCurrentMainWindowState()));
+  mainWindow.on('minimize', () => writeNotificationTrace('main_window_minimize', getCurrentMainWindowState()));
+  mainWindow.on('restore', () => writeNotificationTrace('main_window_restore', getCurrentMainWindowState()));
 
   mainWindow.on('closed', () => {
+    writeNotificationTrace('main_window_closed');
     mainWindow = null;
   });
 
@@ -1286,6 +1354,16 @@ function createTray() {
   tray.setToolTip('Elvador');
   refreshTrayMenu();
   tray.on('click', () => focusMainWindow());
+}
+
+function refreshNativeAppIcons() {
+  const iconPath = getAppIconPath();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setIcon(iconPath);
+  }
+  if (tray && !tray.isDestroyed()) {
+    tray.setImage(createTrayIcon(iconPath));
+  }
 }
 
 function refreshTrayMenu() {
@@ -1372,6 +1450,10 @@ function refreshTrayMenu() {
       label: 'Log Dosyasini Ac',
       click: () => openDesktopLogFile()
     },
+    {
+      label: 'Bildirim Izleme Logunu Ac',
+      click: () => openNotificationTraceLogFile()
+    },
     { type: 'separator' },
     {
       label: 'Çıkış',
@@ -1392,6 +1474,16 @@ function isInternalOnboardingSender(event) {
 }
 
 function registerIpcHandlers() {
+  ipcMain.on('elvador:notification-trace', (event, traceEvent, details = {}) => {
+    if (event.sender !== mainWindow?.webContents) {
+      return;
+    }
+    writeNotificationTrace(String(traceEvent || 'renderer_trace'), {
+      origin: 'renderer_preload',
+      ...(details && typeof details === 'object' ? details : {})
+    });
+  });
+
   ipcMain.handle('elvador:get-desktop-info', () => ({
     isDesktopShell: true,
     platform: process.platform,
@@ -1450,9 +1542,19 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle('elvador:show-native-notification', (_event, payload = {}) => {
-    if (payload?.bridgeSource === 'page-direct') {
-      pendingPoller?.registerDirectNotification(payload);
-    }
+    const directBridgeRegistration = payload?.bridgeSource === 'page-direct'
+      ? pendingPoller?.registerDirectNotification(payload)
+      : null;
+    writeNotificationTrace('native_notification_requested', {
+      origin: payload?.bridgeSource || 'renderer_unknown',
+      id: payload?.id || null,
+      category: payload?.category || null,
+      requestId: payload?.requestId || null,
+      count: payload?.count || null,
+      acknowledgementKey: payload?.acknowledgementKey || null,
+      playSound: payload?.playSound === true,
+      directBridgeRegistration
+    });
     return notificationService.showNotification(payload);
   });
 
@@ -1576,6 +1678,8 @@ if (!gotSingleInstanceLock) {
     registerIpcHandlers();
     createMainWindow();
     createTray();
+    // Reapply the shared ICO after both native Windows surfaces exist so a stale shell image is not retained.
+    refreshNativeAppIcons();
     webDeployMonitor.start();
     startDevelopmentSourceWatcher();
     if (app.isPackaged) {
