@@ -374,7 +374,7 @@ function redactUrlToken(value) {
   if (!text) {
     return '';
   }
-  return text.replace(/(\/admin-access\/)([A-Za-z0-9_-]{8})[A-Za-z0-9_-]+/i, '$1$2...');
+  return text.replace(/(\/admin-access\/)[^/?#\s]+/i, '$1[redacted]');
 }
 
 function getCurrentMainWindowState() {
@@ -601,16 +601,20 @@ function extractAdminAccessToken(rawValue) {
     return null;
   }
 
-  const pathMatch = value.match(/\/admin-access\/([A-Za-z0-9_-]+)/i);
-  if (pathMatch?.[1]) {
-    return pathMatch[1];
+  const pathMatch = value.match(/\/admin-access\/([^/?#\s]+)/i);
+  const encodedToken = pathMatch?.[1] || value;
+  let token;
+  try {
+    token = decodeURIComponent(encodedToken);
+  } catch (_) {
+    return null;
   }
 
-  if (/^[A-Za-z0-9_-]{24,}$/.test(value)) {
-    return value;
-  }
-
-  return null;
+  // 2026-09-04: Admin QR tokens became authenticated admin.v2 values. The old
+  // URL-safe-only parser rejected new links before the server could validate them.
+  return /^admin\.v2\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/i.test(token)
+    ? token
+    : null;
 }
 
 function normalizeAdminAccessInput(rawValue) {
@@ -642,7 +646,7 @@ function saveAdminAccessUrl(rawValue) {
     adminAccessUrl,
     adminAccessSavedAt: new Date().toISOString()
   });
-  writeDesktopLog('admin access url saved', { adminAccessUrl });
+  writeDesktopLog('admin access url saved', { adminAccessUrl: redactUrlToken(adminAccessUrl) });
   return adminAccessUrl;
 }
 

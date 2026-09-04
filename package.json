@@ -1,6 +1,6 @@
 {
   "name": "elvador-desktop",
-  "version": "0.25.37",
+  "version": "0.25.38",
   "private": true,
   "description": "Elvador Windows desktop shell and native notification engine",
   "author": "Elvador",
@@ -10,7 +10,7 @@
     "icons": "node scripts/generate-icons.js",
     "pack": "electron-builder --dir",
     "build:win": "electron-builder --win nsis portable",
-    "build:release": "electron-builder --win --x64 --dir --publish never && node scripts/write-app-update-yml.js win-unpacked && node scripts/post-build-icon.js win-unpacked && npx electron-builder --win nsis --x64 --prepackaged release/win-unpacked --publish never && electron-builder --win --ia32 --dir --publish never && node scripts/write-app-update-yml.js win-ia32-unpacked && node scripts/post-build-icon.js win-ia32-unpacked && npx electron-builder --win nsis --ia32 --prepackaged release/win-ia32-unpacked --publish never"
+    "build:release": "electron-builder --win --x64 --dir --publish never && node scripts/write-app-update-yml.js win-unpacked && node scripts/post-build-icon.js win-unpacked && npx electron-builder --win nsis --x64 --prepackaged release/win-unpacked --publish never && copy /Y release\\latest.yml release\\latest-x64-backup.yml && electron-builder --win --ia32 --dir --publish never && node scripts/write-app-update-yml.js win-ia32-unpacked latest-ia32 && node scripts/post-build-icon.js win-ia32-unpacked && npx electron-builder --win nsis --ia32 --prepackaged release/win-ia32-unpacked --publish never && move /Y release\\latest.yml release\\latest-ia32.yml && move /Y release\\latest-x64-backup.yml release\\latest.yml"
   },
   "dependencies": {
     "electron-updater": "^6.6.2"
