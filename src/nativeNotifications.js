@@ -1,9 +1,10 @@
 const { BrowserWindow, ipcMain, screen } = require('electron');
 
-const OVERLAY_WIDTH = 320;
-const OVERLAY_HEIGHT = 190;
-const OVERLAY_MARGIN = 16;
-const OVERLAY_GAP = 10;
+const OVERLAY_WIDTH = 304;
+const OVERLAY_HEIGHT = 56;
+const OVERLAY_MARGIN = 12;
+const OVERLAY_GAP = 8;
+const MAX_VISIBLE_OVERLAYS = 3;
 const OVERLAY_CHANNEL_OPEN = 'elvador:overlay-notification-open';
 const OVERLAY_CHANNEL_MINIMIZE = 'elvador:overlay-notification-minimize';
 const ACTIVE_DUPLICATE_SUPPRESS_MS = 45000;
@@ -31,6 +32,22 @@ const CATEGORY_UI = Object.freeze({
   desktopTest: { label: 'Test', initials: 'EL', accent: '#111827' },
   panelVisualNotification: { label: 'Panel', initials: 'EL', accent: '#111827' },
   default: { label: 'Elvador', initials: 'EL', accent: '#111827' }
+});
+
+const COMPACT_NOTIFICATION_COPY = Object.freeze({
+  liveSupport: 'Yeni destek talebi',
+  reservation: 'Yeni rezervasyon',
+  housekeeping: 'Yeni kat talebi',
+  technic: 'Yeni teknik talep',
+  orders: 'Yeni sipariş',
+  ordersReservations: 'Yeni masa rezervasyonu',
+  upsell: 'Yeni upsell talebi',
+  spa: 'Yeni spa talebi',
+  lostAndFound: 'Yeni kayıp eşya talebi',
+  conversation: 'Yeni sohbet',
+  desktopTest: 'Test bildirimi',
+  panelVisualNotification: 'Yeni talep',
+  default: 'Yeni talep'
 });
 
 const CATEGORY_ALIASES = Object.freeze({
@@ -295,7 +312,8 @@ function sanitizeNotificationPayload(payload = {}) {
     oldestRequestedAt,
     acknowledgementKey: normalizeText(payload.acknowledgementKey),
     persist: payload.persist !== false,
-    playSound: payload.playSound !== false && payload.silent !== true
+    playSound: payload.playSound !== false && payload.silent !== true,
+    showWhenPanelActive: payload.showWhenPanelActive === true
   };
 }
 
@@ -321,200 +339,91 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-function isOverlayIconSource(value) {
-  const source = String(value || '').trim();
-  return /^https?:\/\/[\w.-]+(?::\d+)?\//i.test(source)
-    || /^data:image\/svg\+xml;base64,[a-z0-9+/]+=*$/i.test(source);
+function getCompactNotificationIcon(category) {
+  if (category === 'reservation' || category === 'ordersReservations') {
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 2v4M16 2v4"/><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M3 10h18M9 16l2 2 4-4"/></svg>';
+  }
+  if (category === 'housekeeping') {
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16M6 20v-5h12v5M8 15V9h8v6M10 9V5h4v4"/></svg>';
+  }
+  if (category === 'technic') {
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a5 5 0 0 0-6.4 6.4L3 18l3 3 5.3-5.3a5 5 0 0 0 6.4-6.4l-3.2 3.2-2.8-2.8 3-3.4Z"/></svg>';
+  }
+  if (category === 'orders') {
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3v8M10 3v8M6 7h4M8 11v10M17 3v18M17 3c3 2 3 6 0 8"/></svg>';
+  }
+  if (category === 'liveSupport' || category === 'conversation') {
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 11.5a8 8 0 0 1-8.5 8 8.6 8.6 0 0 1-3.7-.9L4 20l1.4-3.4A8 8 0 1 1 20 11.5Z"/><path d="M8 11h.01M12 11h.01M16 11h.01"/></svg>';
+  }
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg>';
 }
 
 function buildOverlayHtml(notification) {
   const id = escapeHtml(notification.id);
-  const title = escapeHtml(notification.title);
-  const count = notification.count || 1;
-
-  let cleanTitleType = title.replace(/bildirimi/i, '').replace(/talepleri/i, '').replace(/talebi/i, '').trim();
-  if (cleanTitleType.toLowerCase().includes('destek')) {
-    cleanTitleType = 'Destek';
-  } else if (cleanTitleType.toLowerCase().includes('sohbet')) {
-    cleanTitleType = 'Sohbet';
-  } else if (cleanTitleType.toLowerCase().includes('rezervasyon')) {
-    cleanTitleType = 'Rezervasyon';
-  } else if (cleanTitleType.toLowerCase().includes('kat hizmetleri') || cleanTitleType.toLowerCase().includes('temizlik')) {
-    cleanTitleType = 'Kat Hizmetleri';
-  } else if (cleanTitleType.toLowerCase().includes('teknik')) {
-    cleanTitleType = 'Teknik';
-  } else if (cleanTitleType.toLowerCase().includes('sipariş') || cleanTitleType.toLowerCase().includes('yemek')) {
-    cleanTitleType = 'Sipariş';
-  } else if (cleanTitleType.toLowerCase().includes('upsell')) {
-    cleanTitleType = 'Upsell';
-  } else if (cleanTitleType.toLowerCase().includes('spa')) {
-    cleanTitleType = 'Spa';
-  } else if (cleanTitleType.toLowerCase().includes('kayıp')) {
-    cleanTitleType = 'Kayıp Eşya';
-  }
-
-  const displayTitle = 'Bekleyen Talep';
-  const roomValue = notification.roomNumber ? escapeHtml(notification.roomNumber) : '';
-  const reservationGuestName = escapeHtml(notification.guestName);
-  const isReservation = notification.category === 'reservation' || notification.category === 'ordersReservations';
-  const serviceSourceLabel = notification.category === 'panelVisualNotification'
-    ? ''
-    : escapeHtml(notification.sourceLabel);
-  const serviceRequestTitle = escapeHtml(notification.detailLabel);
-  const rawRoomNumber = String(notification.roomNumber || '').trim();
-  const rawDetailLabel = String(notification.detailLabel || '').trim().toLocaleLowerCase('tr-TR');
-  const detailIncludesRoom = rawRoomNumber && (
-    rawDetailLabel === rawRoomNumber.toLocaleLowerCase('tr-TR')
-    || rawDetailLabel.startsWith(`oda ${rawRoomNumber.toLocaleLowerCase('tr-TR')}`)
-    || rawDetailLabel.startsWith(`${rawRoomNumber.toLocaleLowerCase('tr-TR')} -`)
+  const message = escapeHtml(
+    COMPACT_NOTIFICATION_COPY[notification.category] || COMPACT_NOTIFICATION_COPY.default
   );
-  const requestTitle = isReservation
-    ? ['Rezervasyon', reservationGuestName].filter(Boolean).join(' - ')
-    : [serviceSourceLabel || cleanTitleType, detailIncludesRoom ? '' : roomValue, serviceRequestTitle].filter(Boolean).join(' - ');
-  const requestDetail = isReservation
-    ? ''
-    : '';
-  const sharedReservationIconUrl = isOverlayIconSource(notification.reservationIconUrl)
-    ? escapeHtml(notification.reservationIconUrl)
-    : '';
-  const sharedHousekeepingIconUrl = isOverlayIconSource(notification.housekeepingIconUrl)
-    ? escapeHtml(notification.housekeepingIconUrl)
-    : '';
-  const sharedClockIconUrl = isOverlayIconSource(notification.clockIconUrl)
-    ? escapeHtml(notification.clockIconUrl)
-    : '';
-  const sharedNotificationsIconUrl = isOverlayIconSource(notification.notificationsIconUrl)
-    ? escapeHtml(notification.notificationsIconUrl)
-    : '';
-  const requestIcon = isReservation
-    ? (sharedReservationIconUrl
-      ? `<img class="shared-reservation-icon" src="${sharedReservationIconUrl}" width="24" height="24" alt="">`
-      : '<svg viewBox="0 0 24 24" fill="none" width="24" height="24" stroke-width="2.2"><path d="M8 2v4M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/><path d="m9 16 2 2 4-4"/></svg>')
-    : notification.category === 'housekeeping' && sharedHousekeepingIconUrl
-      ? `<img class="shared-housekeeping-icon" src="${sharedHousekeepingIconUrl}" width="24" height="24" alt="">`
-    : '<svg viewBox="0 0 24 24" fill="none" width="24" height="24" stroke-width="2.2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.121 2.121 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.77 3.77Z"/></svg>';
-  const parsedOldestTimeEpoch = coerceTimestampMs(notification.oldestRequestedAt);
-  const oldestTimeEpoch = Number.isFinite(parsedOldestTimeEpoch) && parsedOldestTimeEpoch > 0
-    ? parsedOldestTimeEpoch
-    : Date.now();
+  const accentColor = sanitizeColor(notification.accentColor, CATEGORY_UI.default.accent);
+  const notificationIcon = getCompactNotificationIcon(notification.category);
 
   return `
 <!doctype html>
 <html>
   <head>
     <meta charset="utf-8">
-    <title>${displayTitle}</title>
+    <title>${message}</title>
     <style>
       * { box-sizing: border-box; }
       html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
       body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; user-select: none; }
-      .n {
+      .toast {
         width: 100vw;
         height: 100vh;
         display: flex;
-        flex-direction: column;
-        gap: 12px;
-        padding: 18px;
-        border-radius: 12px;
-        background: rgba(220, 38, 38, 0.85);
-        border: 1px solid rgba(255, 255, 255, 0.18);
-        box-shadow: 0 4px 14px rgba(220, 38, 38, 0.25), 0 2px 6px rgba(0, 0, 0, 0.1);
-        cursor: pointer;
-        animation: notification-spawn 1150ms cubic-bezier(0.16, 1, 0.3, 1) both;
-      }
-      .headline {
-        display: flex;
         align-items: center;
-        width: 100%;
-        height: 28px;
         gap: 10px;
-        color: #fff;
-      }
-      .title {
-        font-size: 23px;
-        font-weight: 750;
-        line-height: 28px;
+        padding: 10px 8px 10px 12px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-left: 4px solid ${accentColor};
+        border-radius: 10px;
+        background: rgba(24, 24, 27, 0.98);
+        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
         color: #ffffff;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        flex: 1;
+        cursor: pointer;
+        animation: notification-spawn 220ms ease-out both;
       }
-      .minimize-button {
-        width: 40px;
-        height: 40px;
+      .icon { display: flex; flex: 0 0 22px; width: 22px; height: 22px; color: ${accentColor}; }
+      .icon svg { width: 22px; height: 22px; }
+      .message { flex: 1; min-width: 0; overflow: hidden; color: #ffffff; font-size: 15px; font-weight: 650; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
+      .close-button {
+        width: 30px;
+        height: 30px;
         padding: 0;
         border: 0;
-        border-radius: 50%;
+        border-radius: 6px;
         background: transparent;
-        color: #ffffff;
+        color: rgba(255, 255, 255, 0.76);
         cursor: pointer;
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        flex: 0 0 40px;
-        transition: background 160ms ease;
+        flex: 0 0 30px;
       }
-      .minimize-button:hover, .minimize-button:focus-visible { background: rgba(255, 255, 255, 0.2); outline: none; }
-      .divider { height: 1px; width: 100%; background: #ffffff; }
-      .request-card {
-        flex: 1;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        gap: 10px;
-        padding: 14px;
-        border-radius: 10px;
-        background: rgba(255, 255, 255, 0.92);
-        color: #5f1024;
-      }
-      .request-line { display: flex; align-items: center; gap: 5px; min-width: 0; }
-      .request-name { font-size: 16px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .request-title { font-weight: 700; }
-      .request-detail { font-weight: 400; }
-      .request-age { font-size: 16px; font-weight: 700; color: #5f1024; }
-      .request-age--recent { color: #137333; font-weight: 400; }
-      .request-age--critical { color: #dc2626; }
-      .request-icon { flex: 0 0 24px; color: #5f1024; }
-      .request-icon svg { display: block; stroke: currentColor; }
-      .shared-reservation-icon { display: block; width: 24px; height: 24px; filter: brightness(0) saturate(100%) invert(11%) sepia(76%) saturate(2979%) hue-rotate(326deg) brightness(80%) contrast(100%); }
-      .shared-housekeeping-icon { display: block; width: 24px; height: 24px; filter: brightness(0) saturate(100%) invert(11%) sepia(76%) saturate(2979%) hue-rotate(326deg) brightness(80%) contrast(100%); }
-      .shared-clock-icon { display: block; width: 24px; height: 24px; filter: brightness(0) saturate(100%) invert(11%) sepia(76%) saturate(2979%) hue-rotate(326deg) brightness(80%) contrast(100%); }
-      .headline-icon { display: flex; flex: 0 0 24px; width: 24px; height: 24px; align-items: center; justify-content: center; }
-      .headline-icon svg { display: block; stroke: currentColor; }
-      .headline-icon .shared-notifications-icon { display: block; width: 24px; height: 24px; filter: brightness(0) invert(1); transform: translateY(1px); }
+      .close-button:hover, .close-button:focus-visible { background: rgba(255, 255, 255, 0.12); color: #ffffff; outline: none; }
+      .close-button svg { width: 18px; height: 18px; }
       @keyframes notification-spawn {
-        from { opacity: 0; translate: 0 calc(100vh + 32px); }
+        from { opacity: 0; translate: 0 12px; }
         to { opacity: 1; translate: 0 0; }
       }
     </style>
   </head>
   <body>
-    <main class="n" role="button" tabindex="0" data-id="${id}">
-      <div class="headline">
-        <span class="headline-icon" aria-hidden="true">
-          ${sharedNotificationsIconUrl
-            ? `<img class="shared-notifications-icon" src="${sharedNotificationsIconUrl}" width="24" height="24" alt="">`
-            : '<svg viewBox="0 0 24 24" fill="none" width="24" height="24" stroke-width="2.1"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg>'}
-        </span>
-        <span class="title">${displayTitle}</span>
-        <button class="minimize-button" type="button" aria-label="Merkez bildirime küçült">
-          <svg viewBox="0 0 24 24" fill="none" width="26" height="26" stroke="currentColor" stroke-width="2.7"><path d="m6 6 12 12M18 6 6 18"/></svg>
-        </button>
-      </div>
-      <div class="divider" aria-hidden="true"></div>
-      <div class="request-card">
-        <div class="request-line">
-          <span class="request-icon" aria-hidden="true">${requestIcon}</span>
-          <span class="request-name"><span class="request-title">${requestTitle}</span>${requestDetail ? `<span class="request-detail"> - ${requestDetail}</span>` : ''}</span>
-        </div>
-        <div class="request-line">
-          <span class="request-icon" aria-hidden="true">${sharedClockIconUrl
-            ? `<img class="shared-clock-icon" src="${sharedClockIconUrl}" width="24" height="24" alt="">`
-            : '<svg viewBox="0 0 24 24" fill="none" width="24" height="24" stroke-width="2.4"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>'}</span>
-          <span class="request-age request-age--recent" id="time-elapsed">Az önce</span>
-        </div>
-      </div>
+    <main class="toast" role="button" tabindex="0" data-id="${id}">
+      <span class="icon" aria-hidden="true">${notificationIcon}</span>
+      <span class="message">${message}</span>
+      <button class="close-button" type="button" aria-label="Bildirimi kapat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="m6 6 12 12M18 6 6 18"/></svg>
+      </button>
     </main>
     <script>
       const open = () => window.elvadorOverlay.open("${id}");
@@ -524,37 +433,10 @@ function buildOverlayHtml(notification) {
         window.elvadorOverlay.minimize("${id}");
       };
       document.body.addEventListener('click', open);
-      document.querySelector('.minimize-button').addEventListener('click', minimize);
+      document.querySelector('.close-button').addEventListener('click', minimize);
       document.body.addEventListener('keydown', (event) => {
         if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); }
       });
-
-      const oldestTime = ${oldestTimeEpoch};
-      const criticalAgeMs = 5 * 60 * 1000;
-      const updateTime = () => {
-        const elapsedMs = Date.now() - oldestTime;
-        const ageElement = document.getElementById('time-elapsed');
-        ageElement.classList.toggle('request-age--recent', elapsedMs < 60000);
-        ageElement.classList.toggle('request-age--critical', elapsedMs >= criticalAgeMs);
-        if (elapsedMs < 60000) {
-          ageElement.innerText = 'Az önce';
-          return;
-        }
-
-        const minutes = Math.floor(elapsedMs / 60000);
-        if (minutes < 60) {
-          ageElement.innerText = minutes + ' dk önce';
-          return;
-        }
-
-        const hours = Math.floor(minutes / 60);
-        const remainingMinutes = minutes % 60;
-        ageElement.innerText = remainingMinutes > 0
-          ? hours + ' sa ' + remainingMinutes + ' dk önce'
-          : hours + ' sa önce';
-      };
-      updateTime();
-      setInterval(updateTime, 1000);
     </script>
   </body>
 </html>`;
@@ -689,6 +571,29 @@ function createNativeNotificationService({
       record.overlayWindow.close();
     }
     record.overlayWindow = null;
+  }
+
+  function makeRoomForCompactOverlay() {
+    if (activeNotifications.size < MAX_VISIBLE_OVERLAYS) {
+      return;
+    }
+
+    const oldestRecord = Array.from(activeNotifications.values())
+      .filter((record) => !record.isClosing)
+      .sort((left, right) => left.createdAt - right.createdAt)[0];
+    if (!oldestRecord) {
+      return;
+    }
+
+    // 2026-09-09: Background bursts used to fill small laptop screens with large cards.
+    // Keep the newest three direct targets visible; every request remains available in the panel.
+    activeNotifications.delete(oldestRecord.payload.id);
+    closeRecord(oldestRecord);
+    writeLog('notification compact stack limit replaced oldest overlay', {
+      removedId: oldestRecord.payload.id,
+      removedCategory: oldestRecord.payload.category,
+      maxVisibleOverlays: MAX_VISIBLE_OVERLAYS
+    });
   }
 
   function openNotification(notificationId) {
@@ -911,6 +816,8 @@ function createNativeNotificationService({
         category: normalized.category
       });
     }
+
+    makeRoomForCompactOverlay();
 
     const record = {
       payload: normalized,

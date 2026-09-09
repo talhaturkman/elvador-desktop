@@ -657,7 +657,24 @@ function clearAdminAccessUrl() {
 }
 
 function getStartupUrl() {
-  return getSavedAdminAccessUrl() || DESKTOP_ONBOARDING_URL;
+  const savedAdminAccessUrl = getSavedAdminAccessUrl();
+  if (!savedAdminAccessUrl) {
+    return DESKTOP_ONBOARDING_URL;
+  }
+
+  if (!app.isPackaged) {
+    try {
+      const savedUrl = new URL(savedAdminAccessUrl);
+      // 2026-09-09: Source Electron previously opened the saved production
+      // link, hiding local AdminPanel changes. Keep its access path but load it
+      // through the configured local Vite origin in unpackaged development only.
+      return new URL(`${savedUrl.pathname}${savedUrl.search}${savedUrl.hash}`, config.adminUrl).toString();
+    } catch (_) {
+      return config.adminUrl;
+    }
+  }
+
+  return savedAdminAccessUrl;
 }
 
 function createTrayIcon(iconPath) {
@@ -1643,7 +1660,9 @@ if (!gotSingleInstanceLock) {
       playSound: (options) => notificationSoundService.playNotificationSound(options),
       stopSound: (reason) => notificationSoundService.stopNotificationSound(reason),
       writeLog: writeDesktopLog,
-      shouldShowOverlay: () => !isMainWindowActiveForNotifications(),
+      shouldShowOverlay: (notification) => (
+        notification?.showWhenPanelActive === true || !isMainWindowActiveForNotifications()
+      ),
       onNotificationOpened: (payload) => {
         pendingPoller?.acknowledgePendingNotification(payload);
         // 2026-08-15: Only an overlay click reaches this callback. Mark it as
