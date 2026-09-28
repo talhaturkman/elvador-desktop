@@ -1319,8 +1319,29 @@ function createMainWindow(initialUrl = getStartupUrl()) {
       errorDescription,
       validatedUrl
     };
+    writeDesktopLog('main_frame_load_failed', {
+      errorCode,
+      errorDescription,
+      url: redactUrlToken(validatedUrl)
+    });
     refreshTrayMenu();
     loadDesktopErrorPage(lastLoadError);
+  });
+
+  // A frozen renderer cannot open its own right-click menu. Keep diagnosis in
+  // the main process, which also owns the tray recovery action.
+  mainWindow.on('unresponsive', () => {
+    writeDesktopLog('main_window_unresponsive', getCurrentMainWindowState());
+  });
+  mainWindow.on('responsive', () => {
+    writeDesktopLog('main_window_responsive', getCurrentMainWindowState());
+  });
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    writeDesktopLog('main_renderer_gone', {
+      reason: details.reason,
+      exitCode: details.exitCode,
+      window: getCurrentMainWindowState()
+    });
   });
 
   mainWindow.on('close', (event) => {
@@ -1377,6 +1398,22 @@ function createTray() {
   tray.on('click', () => focusMainWindow());
 }
 
+function restartDesktopFromTray() {
+  // A white or frozen panel cannot use its own menu. Relaunch the entire shell
+  // from the tray while preserving the Chromium profile and login session.
+  writeDesktopLog('tray_recovery_restart_requested', {
+    window: getCurrentMainWindowState(),
+    lastLoadError: lastLoadError ? {
+      errorCode: lastLoadError.errorCode,
+      errorDescription: lastLoadError.errorDescription,
+      url: redactUrlToken(lastLoadError.validatedUrl)
+    } : null
+  });
+  markStartupState('quit', { quitAt: new Date().toISOString(), reason: 'tray_recovery_restart' });
+  app.relaunch();
+  app.exit(0);
+}
+
 function refreshNativeAppIcons() {
   const iconPath = getAppIconPath();
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -1427,6 +1464,10 @@ function refreshTrayMenu() {
     {
       label: 'Elvador Aç',
       click: () => openInApp(getStartupUrl())
+    },
+    {
+      label: "Elvador'u Yeniden Başlat",
+      click: () => restartDesktopFromTray()
     },
     {
       label: 'QR/Link Sıfırla',
@@ -1610,6 +1651,14 @@ if (!gotSingleInstanceLock) {
   writeDesktopLog('single instance lock unavailable, quitting');
   app.quit();
 } else {
+  app.on('child-process-gone', (_event, details) => {
+    writeDesktopLog('electron_child_process_gone', {
+      type: details.type,
+      reason: details.reason,
+      exitCode: details.exitCode
+    });
+  });
+
   app.on('second-instance', (_event, argv) => {
     const urlArg = argv.map(parseLaunchUrl).find(Boolean);
     focusMainWindow();
