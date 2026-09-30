@@ -81,14 +81,84 @@ function validateRelease() {
   return { candidate, submitted };
 }
 
+// 2026-09-30: The CLI hid the first update's app-access HTTP error; verify access and published versions without logging credentials.
+async function validateStoreAccess() {
+  const { submitted } = validateRelease();
+  const secretNames = ['AZURE_AD_TENANT_ID', 'AZURE_AD_APPLICATION_CLIENT_ID', 'AZURE_AD_APPLICATION_SECRET', 'SELLER_ID', 'STORE_PRODUCT_ID'];
+  const redactedValues = secretNames.map((name) => process.env[name]).filter(Boolean);
+  for (const name of secretNames) {
+    if (!process.env[name]?.trim()) throw new Error(`STORE_ACCESS missing_environment=${name}`);
+  }
+
+  function safeMessage(value) {
+    let message = String(value || 'unknown');
+    for (const secret of redactedValues) message = message.split(secret).join('[masked]');
+    return message.replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[masked-token]')
+      .replace(/[\r\n]+/g, ' ').slice(0, 600);
+  }
+
+  async function requestJson(url, options, phase) {
+    let response;
+    try {
+      response = await fetch(url, { ...options, signal: AbortSignal.timeout(30000) });
+    } catch (_) {
+      throw new Error(`STORE_ACCESS phase=${phase} network_request_failed`);
+    }
+    const body = await response.json().catch(() => null);
+    if (!response.ok) {
+      const code = body?.error?.code || body?.code || body?.error;
+      const message = body?.error?.message || body?.message || body?.error_description;
+      throw new Error(`STORE_ACCESS phase=${phase} http=${response.status} code=${safeMessage(code)} message=${safeMessage(message)}`);
+    }
+    if (!body) throw new Error(`STORE_ACCESS phase=${phase} invalid_json_response`);
+    return body;
+  }
+
+  const tokenResponse = await requestJson(`https://login.microsoftonline.com/${encodeURIComponent(process.env.AZURE_AD_TENANT_ID.trim())}/oauth2/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: process.env.AZURE_AD_APPLICATION_CLIENT_ID.trim(),
+      client_secret: process.env.AZURE_AD_APPLICATION_SECRET,
+      resource: 'https://manage.devcenter.microsoft.com'
+    }).toString()
+  }, 'authentication');
+  if (!tokenResponse.access_token) throw new Error('STORE_ACCESS authentication_token_missing');
+  redactedValues.push(tokenResponse.access_token);
+
+  const headers = { Authorization: `Bearer ${tokenResponse.access_token}` };
+  const appUrl = `https://manage.devcenter.microsoft.com/v1.0/my/applications/${encodeURIComponent(process.env.STORE_PRODUCT_ID.trim())}`;
+  const app = await requestJson(appUrl, { headers }, 'application');
+  if (app.packageIdentityName !== expectedIdentity.identityName) {
+    throw new Error('STORE_ACCESS application_identity_mismatch');
+  }
+  const publishedId = app.lastPublishedApplicationSubmission?.id;
+  if (!publishedId) throw new Error('STORE_ACCESS published_submission_missing');
+  const publication = await requestJson(`${appUrl}/submissions/${encodeURIComponent(publishedId)}`, { headers }, 'published_submission');
+  const versions = [...new Set((publication.applicationPackages || []).map((item) => item.version).filter(Boolean))];
+  const expectedVersion = `${submitted.version}.0`;
+  if (!versions.length || versions.some((version) => version !== expectedVersion)) {
+    throw new Error(`STORE_ACCESS published_version_mismatch expected=${expectedVersion}`);
+  }
+  console.log(`STORE_ACCESS verified identity=${expectedIdentity.identityName} published_version=${expectedVersion}; no credentials logged.`);
+}
+
 const command = process.argv[2];
-if (!['check', 'reserve'].includes(command)) {
-  console.error('Kullanım: node scripts/check-store-release.js check|reserve');
+if (!['check', 'reserve', 'access'].includes(command)) {
+  console.error('Kullanım: node scripts/check-store-release.js check|reserve|access');
   process.exit(2);
 }
 
-const { candidate } = validateRelease();
-if (command === 'reserve') {
-  fs.writeFileSync(submittedVersionPath, `${JSON.stringify({ version: candidate.version }, null, 2)}\n`, 'utf8');
-  console.log(`Store ${candidate.version} sürümü gönderim için rezerve edildi.`);
+if (command === 'access') {
+  validateStoreAccess().catch((error) => {
+    console.error(error.message);
+    process.exitCode = 1;
+  });
+} else {
+  const { candidate } = validateRelease();
+  if (command === 'reserve') {
+    fs.writeFileSync(submittedVersionPath, `${JSON.stringify({ version: candidate.version }, null, 2)}\n`, 'utf8');
+    console.log(`Store ${candidate.version} sürümü gönderim için rezerve edildi.`);
+  }
 }

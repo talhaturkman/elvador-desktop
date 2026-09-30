@@ -125,6 +125,11 @@ jobs:
             throw 'Microsoft Store CLI kimlik doğrulaması başarısız oldu. Secret değerlerini ve Partner Center API erişimini kontrol edin.'
           }
 
+          node scripts/check-store-release.js access
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Store API erişimi veya yayımdaki paket sürümü doğrulanamadı; paket yükleme yapılmayacak.'
+          }
+
           msstore apps get $env:STORE_PRODUCT_ID
           if ($LASTEXITCODE -ne 0) {
             throw 'Store Product/App ID doğrulanamadı veya uygulamaya Partner Center API erişimi yok.'
