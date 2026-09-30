@@ -21,12 +21,17 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $packageFiles = [System.Collections.Generic.List[string]]::new()
 foreach ($architecture in $architectures) {
   $packageDirectory = Join-Path $projectRoot "release/store/$architecture"
-  $packages = @(Get-ChildItem -LiteralPath $packageDirectory -Filter '*.appx' -File)
-  if ($packages.Count -ne 1) {
-    throw "release/store/$architecture içinde tam bir .appx paketi bekleniyordu; bulunan: $($packages.Count)."
+  # 2026-09-30: Older local 1.0.0 packages must not block verification of the new 1.0.1 release.
+  $packageName = "$($packageConfig.build.productName) $Version"
+  if ($architecture -eq 'x86') {
+    $packageName += ' ia32'
+  }
+  $packagePath = Join-Path $packageDirectory "$packageName.appx"
+  if (!(Test-Path -LiteralPath $packagePath -PathType Leaf)) {
+    throw "release/store/$architecture içinde $Version paketi bulunamadı: $packagePath."
   }
 
-  $package = $packages[0]
+  $package = Get-Item -LiteralPath $packagePath
   $archive = [System.IO.Compression.ZipFile]::OpenRead($package.FullName)
   try {
     $manifestEntry = $archive.GetEntry('AppxManifest.xml')
