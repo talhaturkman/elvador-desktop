@@ -1,0 +1,191 @@
+name: Microsoft Store Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_production_submission:
+        description: Confirm that this release should be submitted to the live Microsoft Store app
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: microsoft-store-production-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  store-release:
+    name: Build and submit Store packages
+    runs-on: windows-latest
+    env:
+      ELECTRON_CACHE: ${{ github.workspace }}/.cache/electron
+      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
+      STORE_PRODUCT_ID: ${{ secrets.STORE_PRODUCT_ID }}
+
+    steps:
+      - name: Check manual production confirmation and main branch
+        shell: pwsh
+        env:
+          STORE_RELEASE_CONFIRMATION: ${{ inputs.confirm_production_submission }}
+        run: |
+          if ($env:GITHUB_REF -ne 'refs/heads/main') {
+            throw 'Store release yalnızca main dalından başlatılabilir.'
+          }
+          if ($env:STORE_RELEASE_CONFIRMATION -ne 'true') {
+            throw 'Canlı Store gönderimi için workflow_dispatch ekranında onay kutusunu işaretleyin.'
+          }
+
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Cache Electron build downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/electron
+            .cache/electron-builder
+          key: ${{ runner.os }}-electron-store-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-store-
+
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit --no-fund
+
+      - name: Validate Store version and identity
+        id: store_version
+        shell: pwsh
+        run: |
+          node scripts/check-store-release.js check
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Store sürümü, kimliği veya x86 desteği doğrulanamadı.'
+          }
+
+      - name: Build Store package (x64)
+        run: npm run build:store:x64
+
+      - name: Build Store package (x86)
+        if: steps.store_version.outputs.x86_supported == 'true'
+        run: npm run build:store:x86
+
+      - name: Validate package identity, architecture, version, and runtime
+        id: store_packages
+        shell: pwsh
+        env:
+          STORE_PACKAGE_VERSION: ${{ steps.store_version.outputs.version }}
+          STORE_X86_SUPPORTED: ${{ steps.store_version.outputs.x86_supported }}
+        run: |
+          if ($env:STORE_X86_SUPPORTED -eq 'true') {
+            & .\scripts\verify-store-packages.ps1 -Version $env:STORE_PACKAGE_VERSION -IncludeX86 -RunSmoke
+          } else {
+            & .\scripts\verify-store-packages.ps1 -Version $env:STORE_PACKAGE_VERSION -RunSmoke
+          }
+
+      - name: Install the official Microsoft Store Developer CLI
+        uses: microsoft/microsoft-store-apppublisher@v1.4
+
+      - name: Authenticate and verify Store product access
+        shell: pwsh
+        env:
+          AZURE_AD_TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
+          AZURE_AD_APPLICATION_CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
+          AZURE_AD_APPLICATION_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
+          SELLER_ID: ${{ secrets.SELLER_ID }}
+        run: |
+          $requiredSecrets = @(
+            'AZURE_AD_TENANT_ID',
+            'AZURE_AD_APPLICATION_CLIENT_ID',
+            'AZURE_AD_APPLICATION_SECRET',
+            'SELLER_ID',
+            'STORE_PRODUCT_ID'
+          )
+          foreach ($name in $requiredSecrets) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "GitHub repository secret eksik: $name"
+            }
+          }
+
+          msstore reconfigure `
+            --tenantId $env:AZURE_AD_TENANT_ID `
+            --sellerId $env:SELLER_ID `
+            --clientId $env:AZURE_AD_APPLICATION_CLIENT_ID `
+            --clientSecret $env:AZURE_AD_APPLICATION_SECRET
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Microsoft Store CLI kimlik doğrulaması başarısız oldu. Secret değerlerini ve Partner Center API erişimini kontrol edin.'
+          }
+
+          msstore apps get $env:STORE_PRODUCT_ID
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Store Product/App ID doğrulanamadı veya uygulamaya Partner Center API erişimi yok.'
+          }
+
+      - name: Upload packages as a Store draft
+        shell: pwsh
+        env:
+          STORE_UPLOAD_PATH: ${{ steps.store_packages.outputs.upload_path }}
+        run: |
+          if (!(Test-Path -LiteralPath $env:STORE_UPLOAD_PATH)) {
+            throw "MSIX upload dosyası bulunamadı: $env:STORE_UPLOAD_PATH"
+          }
+          msstore publish "$env:GITHUB_WORKSPACE" `
+            --inputFile "$env:STORE_UPLOAD_PATH" `
+            --appId $env:STORE_PRODUCT_ID `
+            --noCommit
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Microsoft Store paketi taslak submission olarak yüklenemedi.'
+          }
+
+      - name: Reserve the submitted Store version in the repository
+        shell: pwsh
+        env:
+          STORE_PACKAGE_VERSION: ${{ steps.store_version.outputs.version }}
+        run: |
+          node scripts/check-store-release.js reserve
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Store sürümü gönderim kaydına yazılamadı; submission certification sürecine gönderilmeyecek.'
+          }
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add store/last-submitted-version.json
+          git commit -m "chore(store): reserve version $env:STORE_PACKAGE_VERSION"
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Store sürüm kaydı commit edilemedi; submission certification sürecine gönderilmeyecek.'
+          }
+
+          git push origin HEAD:refs/heads/main
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Store sürüm kaydı main dalına gönderilemedi. Workflow token yazma iznini ve main dalı kurallarını kontrol edin; Store submission taslakta kaldı.'
+          }
+
+      - name: Submit the Store update for certification
+        shell: pwsh
+        run: |
+          msstore submission publish $env:STORE_PRODUCT_ID
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Microsoft Store submission gönderilemedi. Partner Center taslak submission durumunu kontrol edin; bu sürüm tekrar kullanılmamalı.'
+          }
+
+      - name: Report Microsoft Store submission status
+        shell: pwsh
+        run: |
+          Write-Host 'Microsoft Store submission durumu (sertifikasyon tamamlanması daha sonra gerçekleşebilir):'
+          $statusOutput = msstore submission status $env:STORE_PRODUCT_ID 2>&1
+          $statusOutput | ForEach-Object { Write-Host $_ }
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Submission gönderildi ancak durum Microsoft Store API üzerinden alınamadı. Partner Center > Elvador > Submissions ekranından durumu kontrol edin.'
+          }
+          if (($statusOutput -join "`n") -match '(?i)\b(FAILED|REJECTED)\b') {
+            throw 'Microsoft Store submission FAILED/REJECTED durumunda. Actions logunu ve Partner Center > Elvador > Submissions hata ayrıntılarını kontrol edin; aynı Store version tekrar kullanılmamalı.'
+          }

@@ -71,6 +71,10 @@ function getStoredAdminSession() {
 }
 
 function syncStoredAdminSession() {
+  // 2026-09-30: Local error/onboarding documents have no panel storage; do not clear the notification session or repeatedly access their opaque origin.
+  if (window.location.protocol !== 'http:' && window.location.protocol !== 'https:') {
+    return;
+  }
   const session = getStoredAdminSession();
   const sessionKey = session.token
     ? `${session.token}:${session.username || ''}:${session.brand || ''}:${session.role || ''}`

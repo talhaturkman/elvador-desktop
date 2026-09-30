@@ -1,6 +1,6 @@
 {
   "name": "elvador-desktop",
-  "version": "0.25.40",
+  "version": "0.25.41",
   "private": true,
   "description": "Elvador Windows desktop shell and native notification engine",
   "author": "Elvador",
@@ -8,7 +8,10 @@
   "scripts": {
     "dev": "electron .",
     "icons": "node scripts/generate-icons.js",
+    "icons:store": "node scripts/generate-store-assets.js",
     "pack": "electron-builder --dir",
+    "build:store:x64": "node scripts/build-store-package.js x64",
+    "build:store:x86": "node scripts/build-store-package.js x86",
     "build:win": "electron-builder --win nsis portable",
     "build:release": "electron-builder --win --x64 --dir --publish never && node scripts/write-app-update-yml.js win-unpacked && node scripts/post-build-icon.js win-unpacked && npx electron-builder --win nsis --x64 --prepackaged release/win-unpacked --publish never && copy /Y release\\latest.yml release\\latest-x64-backup.yml && electron-builder --win --ia32 --dir --publish never && node scripts/write-app-update-yml.js win-ia32-unpacked latest-ia32 && node scripts/post-build-icon.js win-ia32-unpacked && npx electron-builder --win nsis --ia32 --prepackaged release/win-ia32-unpacked --publish never && move /Y release\\latest.yml release\\latest-ia32.yml && move /Y release\\latest-x64-backup.yml release\\latest.yml"
   },
@@ -24,6 +27,13 @@
   "build": {
     "appId": "com.elvador.desktop",
     "productName": "Elvador",
+    "appx": {
+      "applicationId": "App",
+      "identityName": "Elvador.elvador",
+      "publisher": "CN=81B62940-3669-4827-A250-7FACEFCE39A5",
+      "publisherDisplayName": "Elvador",
+      "displayName": "Elvador"
+    },
     "directories": {
       "output": "release"
     },

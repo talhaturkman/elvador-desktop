@@ -2,11 +2,15 @@ node_modules/
 dist/
 out/
 release/
+build/appx/
 .vite/
 .cache/
 *.exe
 *.msi
+*.appx
+*.msix
+*.appxupload
+*.msixupload
 *.zip
 *.blockmap
 *.log
-

@@ -6,6 +6,51 @@ const earlyLogFilePath = path.join(earlyLogDirectory, 'desktop.log');
 const notificationTraceFilePath = path.join(earlyLogDirectory, 'desktop-notification-trace.log');
 const startupStatePath = path.join(earlyLogDirectory, 'desktop-startup-state.json');
 const STARTUP_AUTO_SAFE_MODE_WINDOW_MS = 10 * 60 * 1000;
+const MAX_DESKTOP_LOG_BYTES = 2 * 1024 * 1024;
+const MAX_DESKTOP_LOG_ENTRY_BYTES = 16 * 1024;
+const desktopLogSizes = new Map();
+const desktopLogHeartbeats = new Map();
+const DESKTOP_LOG_HEARTBEAT_MS = 15 * 60 * 1000;
+
+// 2026-09-30: Bound both diagnostic files; an unlimited desktop.log reached 96.7 MB and froze the log viewer.
+function appendBoundedDesktopLog(filePath, entry) {
+  if (!desktopLogSizes.has(filePath)) {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    desktopLogSizes.set(filePath, fs.existsSync(filePath) ? fs.statSync(filePath).size : 0);
+  }
+
+  let output = Buffer.from(`${entry}\n`, 'utf8');
+  if (output.length > MAX_DESKTOP_LOG_ENTRY_BYTES) {
+    output = Buffer.from(`${JSON.stringify({ at: new Date().toISOString(), event: 'oversized_log_entry_omitted', bytes: output.length })}\n`);
+  }
+
+  const currentSize = desktopLogSizes.get(filePath);
+  if (currentSize + output.length > MAX_DESKTOP_LOG_BYTES) {
+    const oldestArchive = `${filePath}.2`;
+    const latestArchive = `${filePath}.1`;
+    if (fs.existsSync(oldestArchive)) fs.unlinkSync(oldestArchive);
+    if (fs.existsSync(latestArchive)) fs.renameSync(latestArchive, oldestArchive);
+
+    if (currentSize > MAX_DESKTOP_LOG_BYTES) {
+      const descriptor = fs.openSync(filePath, 'r');
+      try {
+        const tail = Buffer.alloc(MAX_DESKTOP_LOG_BYTES);
+        const bytesRead = fs.readSync(descriptor, tail, 0, tail.length, currentSize - tail.length);
+        const firstNewline = tail.indexOf(10);
+        fs.writeFileSync(latestArchive, tail.subarray(firstNewline < 0 ? bytesRead : firstNewline + 1, bytesRead));
+      } finally {
+        fs.closeSync(descriptor);
+      }
+      fs.truncateSync(filePath, 0);
+    } else if (fs.existsSync(filePath)) {
+      fs.renameSync(filePath, latestArchive);
+    }
+    desktopLogSizes.set(filePath, 0);
+  }
+
+  fs.appendFileSync(filePath, output);
+  desktopLogSizes.set(filePath, desktopLogSizes.get(filePath) + output.length);
+}
 
 function readEarlyStartupState() {
   try {
@@ -79,11 +124,10 @@ earlyApp.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
 
 function writeEarlyDesktopLog(message, details = null) {
   try {
-    fs.mkdirSync(earlyLogDirectory, { recursive: true });
     const detailText = details
       ? ` ${typeof details === 'string' ? details : JSON.stringify(details)}`
       : '';
-    fs.appendFileSync(earlyLogFilePath, `[${new Date().toISOString()}] ${message}${detailText}\n`);
+    appendBoundedDesktopLog(earlyLogFilePath, `[${new Date().toISOString()}] ${message}${detailText}`);
   } catch (_) {
     // Logging must never break app startup.
   }
@@ -111,7 +155,14 @@ const {
   screen,
   shell
 } = require('electron');
-const { autoUpdater } = require('electron-updater');
+const isStoreUpdaterSmokeTest = process.env.ELVADOR_STORE_UPDATER_SMOKE_TEST === 'true';
+// Store packages are updated by Microsoft Store. Keep electron-updater unloaded there so it cannot download or launch an external installer.
+const IS_MICROSOFT_STORE_BUILD = process.windowsStore === true
+  || process.env.ELVADOR_DISTRIBUTION_CHANNEL === 'microsoft-store'
+  || isStoreUpdaterSmokeTest;
+const autoUpdater = IS_MICROSOFT_STORE_BUILD
+  ? null
+  : require('electron-updater').autoUpdater;
 const { getDesktopConfig } = require('./config');
 const { createNativeNotificationService } = require('./nativeNotifications');
 const { createNativeNotificationSoundService } = require('./nativeNotificationSound');
@@ -123,8 +174,13 @@ if (!app.isPackaged) {
   process.env.ELVADOR_API_BASE_URL = process.env.ELVADOR_API_BASE_URL || 'http://127.0.0.1:5002';
 }
 
+if (isStoreUpdaterSmokeTest) {
+  // Keep the CI smoke process isolated from a developer's installed Elvador profile and single-instance lock.
+  app.setPath('userData', path.join(process.env.TEMP || process.cwd(), `elvador-store-smoke-${process.pid}`));
+}
+
 const config = getDesktopConfig();
-const gotSingleInstanceLock = app.requestSingleInstanceLock();
+const gotSingleInstanceLock = isStoreUpdaterSmokeTest || app.requestSingleInstanceLock();
 const logDirectory = earlyLogDirectory;
 const logFilePath = earlyLogFilePath;
 const DESKTOP_ONBOARDING_URL = 'elvador-desktop://onboarding';
@@ -139,6 +195,8 @@ let webDeployMonitor = null;
 let isQuitting = false;
 let webDeployReloadInProgress = false;
 let lastLoadError = null;
+let panelLoadHttpError = null;
+let panelNavigationInProgress = false;
 let lastLoadedUrl = config.adminUrl;
 let lastNotificationState = { activeCount: 0, activeIds: [] };
 let desktopSettings = {};
@@ -155,11 +213,34 @@ let updatePromptState = {
 
 function writeDesktopLog(message, details = null) {
   try {
-    fs.mkdirSync(logDirectory, { recursive: true });
+    let heartbeatKey = null;
+    let heartbeatValue = '';
+    if (message === 'pending poll' && details?.trigger === 'none') {
+      heartbeatKey = message;
+      heartbeatValue = JSON.stringify(details);
+    } else if (message === 'web_deploy_monitor' && details?.details?.reason === 'scheduled') {
+      if (details.event === 'check_started') return;
+      if (details.event === 'version_unchanged') {
+        heartbeatKey = message;
+        heartbeatValue = details.details.buildId;
+      }
+    } else if (message === 'updater:info') {
+      if (String(details) === 'Checking for update') return;
+      if (String(details).includes(' is not available (latest version:')) {
+        heartbeatKey = message;
+        heartbeatValue = String(details);
+      }
+    }
+    if (heartbeatKey) {
+      const previous = desktopLogHeartbeats.get(heartbeatKey);
+      const now = Date.now();
+      if (previous?.value === heartbeatValue && now - previous.at < DESKTOP_LOG_HEARTBEAT_MS) return;
+      desktopLogHeartbeats.set(heartbeatKey, { value: heartbeatValue, at: now });
+    }
     const detailText = details
       ? ` ${typeof details === 'string' ? details : JSON.stringify(details)}`
       : '';
-    fs.appendFileSync(logFilePath, `[${new Date().toISOString()}] ${message}${detailText}\n`);
+    appendBoundedDesktopLog(logFilePath, `[${new Date().toISOString()}] ${message}${detailText}`);
   } catch (_) {
     // Logging must never break app startup.
   }
@@ -169,14 +250,13 @@ function writeDesktopLog(message, details = null) {
 // correlated across the panel bridge, native poller, overlay and window focus without F12.
 function writeNotificationTrace(event, details = {}) {
   try {
-    fs.mkdirSync(logDirectory, { recursive: true });
     const entry = {
       at: new Date().toISOString(),
       pid: process.pid,
       event,
       ...details
     };
-    fs.appendFileSync(notificationTraceFilePath, `${JSON.stringify(entry)}\n`);
+    appendBoundedDesktopLog(notificationTraceFilePath, JSON.stringify(entry));
     writeDesktopLog('notification_trace', entry);
   } catch (_) {
     // Observation logging must never interrupt native notification delivery.
@@ -213,6 +293,9 @@ function startDevelopmentSourceWatcher() {
 }
 function emitWebDeployBrowserLog(event, details = {}) {
   if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+  if (details.reason === 'scheduled' && (event === 'check_started' || event === 'version_unchanged')) {
     return;
   }
 
@@ -326,7 +409,11 @@ async function reloadPanelForWebDeploy({ previousBuildId, buildId, generatedAt, 
     };
 
     const onFinishLoad = () => {
-      finish(true, 'did_finish_load');
+      if (panelLoadHttpError) {
+        finish(false, 'http_error', { statusCode: panelLoadHttpError.statusCode });
+      } else {
+        finish(true, 'did_finish_load');
+      }
     };
     const onFailLoad = (_event, errorCode, errorDescription, validatedUrl, isMainFrame) => {
       if (isMainFrame && errorCode !== -3) {
@@ -473,16 +560,30 @@ function openDiagnosticsReport() {
   }
 }
 
-function openDesktopLogFile() {
+// 2026-09-30: Open a bounded snapshot instead of a growing live log that stalled the user's editor.
+function openDesktopLogSnapshot(sourcePath, snapshotName) {
   try {
-    fs.mkdirSync(path.dirname(logFilePath), { recursive: true });
-    if (!fs.existsSync(logFilePath)) {
-      fs.writeFileSync(logFilePath, '', 'utf8');
+    fs.mkdirSync(logDirectory, { recursive: true });
+    const snapshotPath = path.join(logDirectory, snapshotName);
+    let tail = Buffer.alloc(0);
+    if (fs.existsSync(sourcePath)) {
+      const descriptor = fs.openSync(sourcePath, 'r');
+      try {
+        const size = fs.fstatSync(descriptor).size;
+        const start = Math.max(0, size - 256 * 1024);
+        const buffer = Buffer.alloc(size - start);
+        const bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, start);
+        const firstNewline = start > 0 ? buffer.indexOf(10) : -1;
+        tail = buffer.subarray(start > 0 ? (firstNewline < 0 ? bytesRead : firstNewline + 1) : 0, bytesRead);
+      } finally {
+        fs.closeSync(descriptor);
+      }
     }
-    shell.openPath(logFilePath).then((errorMessage) => {
+    fs.writeFileSync(snapshotPath, tail);
+    shell.openPath(snapshotPath).then((errorMessage) => {
       if (errorMessage) {
         writeDesktopLog('desktop_log_open_error', { message: errorMessage });
-        shell.showItemInFolder(logFilePath);
+        shell.showItemInFolder(snapshotPath);
       }
     });
   } catch (error) {
@@ -490,21 +591,12 @@ function openDesktopLogFile() {
   }
 }
 
+function openDesktopLogFile() {
+  openDesktopLogSnapshot(logFilePath, 'desktop-recent.log');
+}
+
 function openNotificationTraceLogFile() {
-  try {
-    fs.mkdirSync(path.dirname(notificationTraceFilePath), { recursive: true });
-    if (!fs.existsSync(notificationTraceFilePath)) {
-      fs.writeFileSync(notificationTraceFilePath, '', 'utf8');
-    }
-    shell.openPath(notificationTraceFilePath).then((errorMessage) => {
-      if (errorMessage) {
-        writeDesktopLog('notification_trace_open_error', { message: errorMessage });
-        shell.showItemInFolder(notificationTraceFilePath);
-      }
-    });
-  } catch (error) {
-    writeDesktopLog('notification_trace_open_error', { message: error?.message });
-  }
+  openDesktopLogSnapshot(notificationTraceFilePath, 'desktop-notification-recent.log');
 }
 
 function playSoundTest(source = 'manual-sound-test') {
@@ -1101,7 +1193,11 @@ function loadDesktopErrorPage(error = {}) {
   }
 
   const targetUrl = escapeHtml(lastLoadedUrl || config.adminUrl);
-  const message = escapeHtml(error.errorDescription || error.message || 'Panel could not be loaded.');
+  const message = escapeHtml(error.errorDescription || error.message || 'Panel yüklenemedi.');
+  const guidance = error.statusCode === 429
+    ? 'Sunucu geçici olarak yoğun. Biraz bekleyip yeniden deneyin; oturumunuz korunur.'
+    : 'İnternet bağlantısını, VPN/proxy ayarlarını veya admin adresini kontrol edin.';
+  const retryDelaySeconds = error.statusCode === 429 ? Math.max(30, error.retryAfterSeconds || 0) : 0;
   const html = `
 <!doctype html>
 <html>
@@ -1116,16 +1212,30 @@ function loadDesktopErrorPage(error = {}) {
       p { margin: 0 0 14px; color: #cfcfcf; line-height: 1.45; }
       code { display: block; padding: 10px; border-radius: 7px; background: #0b0b0b; color: #e6e6e6; white-space: normal; word-break: break-all; }
       button { margin-top: 18px; border: 0; border-radius: 7px; background: #fff; color: #111; padding: 10px 14px; font-weight: 700; cursor: pointer; }
+      button:disabled { opacity: .55; cursor: wait; }
     </style>
   </head>
   <body>
     <main class="panel">
       <h1>Elvador paneli yüklenemedi</h1>
-      <p>İnternet bağlantısını, VPN/proxy ayarlarını veya admin URL'ini kontrol edin.</p>
+      <p>${guidance}</p>
       <p>${message}</p>
       <code>${targetUrl}</code>
-      <button onclick="location.href='${targetUrl}'">Yeniden dene</button>
+      <button id="retryButton" ${retryDelaySeconds ? 'disabled' : ''} onclick="location.href='${targetUrl}'">Yeniden dene</button>
     </main>
+    <script>
+      let remainingSeconds = ${retryDelaySeconds};
+      const retryButton = document.getElementById('retryButton');
+      if (remainingSeconds > 0) {
+        retryButton.textContent = 'Yeniden dene (' + remainingSeconds + ' sn)';
+        const retryTimer = setInterval(() => {
+          remainingSeconds -= 1;
+          retryButton.disabled = remainingSeconds > 0;
+          retryButton.textContent = remainingSeconds > 0 ? 'Yeniden dene (' + remainingSeconds + ' sn)' : 'Yeniden dene';
+          if (remainingSeconds <= 0) clearInterval(retryTimer);
+        }, 1000);
+      }
+    </script>
   </body>
 </html>`;
 
@@ -1183,12 +1293,12 @@ function createMainWindow(initialUrl = getStartupUrl()) {
           loadDesktopOnboardingPage();
         }
       },
-      {
+      ...(autoUpdater ? [{
         label: 'Güncelleme Kontrol Et',
         click: () => {
           autoUpdater.checkForUpdates().catch(() => {});
         }
-      },
+      }] : []),
       {
         label: 'Ses Testi',
         click: () => playSoundTest('context-menu-sound-test')
@@ -1279,9 +1389,44 @@ function createMainWindow(initialUrl = getStartupUrl()) {
 
   mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
     const headers = { ...details.responseHeaders };
+    const statusCode = Number(details.statusCode);
+    const isPanelRequest = mainWindow && !mainWindow.isDestroyed()
+      && (details.webContentsId ?? details.webContents?.id) === mainWindow.webContents.id;
+    const isMainFrame = isPanelRequest && details.resourceType === 'mainFrame';
+    const isPanelAsset = isPanelRequest && panelNavigationInProgress
+      && (details.resourceType === 'script' || details.resourceType === 'stylesheet')
+      && details.url.startsWith(`${new URL(config.adminUrl).origin}/assets/`);
+    // 2026-09-30: Cloud Run returned 429 for /admin and its assets; did-finish-load incorrectly marked the black error document as a working panel.
+    if (statusCode >= 400 && (isMainFrame || isPanelAsset) && !panelLoadHttpError) {
+      const retryAfterValue = headers['retry-after']?.[0] || headers['Retry-After']?.[0];
+      const numericDelay = Number(retryAfterValue);
+      const retryAfterSeconds = Number.isFinite(numericDelay) && numericDelay >= 0
+        ? Math.ceil(numericDelay)
+        : Math.max(0, Math.ceil((Date.parse(retryAfterValue) - Date.now()) / 1000)) || 0;
+      panelLoadHttpError = {
+        statusCode,
+        errorCode: statusCode,
+        errorDescription: `Sunucu paneli yükleyemedi (HTTP ${statusCode}).`,
+        validatedUrl: isMainFrame ? details.url : lastLoadedUrl,
+        retryAfterSeconds
+      };
+      writeDesktopLog('panel_http_load_failed', {
+        statusCode,
+        resourceType: details.resourceType,
+        url: redactUrlToken(details.url),
+        retryAfterSeconds
+      });
+    }
     delete headers['content-security-policy'];
     delete headers['Content-Security-Policy'];
     callback({ responseHeaders: headers });
+  });
+
+  mainWindow.webContents.on('did-start-navigation', (_event, url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace && !url.startsWith('data:')) {
+      panelNavigationInProgress = true;
+      panelLoadHttpError = null;
+    }
   });
 
   mainWindow.webContents.on('did-finish-load', () => {
@@ -1290,7 +1435,15 @@ function createMainWindow(initialUrl = getStartupUrl()) {
     }
 
     const currentUrl = mainWindow.webContents.getURL();
+    panelNavigationInProgress = false;
     if (!currentUrl.startsWith('data:text/html')) {
+      if (panelLoadHttpError) {
+        lastLoadError = panelLoadHttpError;
+        lastLoadedUrl = currentUrl;
+        refreshTrayMenu();
+        loadDesktopErrorPage(lastLoadError);
+        return;
+      }
       lastLoadError = null;
       lastLoadedUrl = currentUrl;
       refreshTrayMenu();
@@ -1677,9 +1830,36 @@ if (!gotSingleInstanceLock) {
   });
 
   app.whenReady().then(() => {
+    if (isStoreUpdaterSmokeTest) {
+      const smokeResult = {
+        windowsStore: process.windowsStore === true,
+        storeBuildDetected: IS_MICROSOFT_STORE_BUILD,
+        electronUpdaterLoaded: autoUpdater !== null
+      };
+      writeDesktopLog('store updater smoke test', smokeResult);
+      if (process.env.ELVADOR_STORE_SMOKE_REPORT) {
+        try {
+          fs.writeFileSync(process.env.ELVADOR_STORE_SMOKE_REPORT, `${JSON.stringify(smokeResult)}\n`, 'utf8');
+        } catch (error) {
+          writeDesktopLog('store updater smoke report failed', { message: error?.message });
+          app.exit(1);
+          return;
+        }
+      }
+      const requireWindowsStore = process.env.ELVADOR_STORE_SMOKE_REQUIRE_WINDOWS_STORE === 'true';
+      const passed = smokeResult.storeBuildDetected
+        && !smokeResult.electronUpdaterLoaded
+        && (!requireWindowsStore || smokeResult.windowsStore);
+      app.exit(passed ? 0 : 1);
+      return;
+    }
+
     desktopSettings = readDesktopSettings();
     writeDesktopLog('app ready', {
       packaged: app.isPackaged,
+      windowsStore: process.windowsStore === true,
+      storeBuildDetected: IS_MICROSOFT_STORE_BUILD,
+      electronUpdaterLoaded: autoUpdater !== null,
       resourcesPath: process.resourcesPath,
       adminUrl: config.adminUrl,
       apiBaseUrl: config.apiBaseUrl
@@ -1754,7 +1934,7 @@ if (!gotSingleInstanceLock) {
     refreshNativeAppIcons();
     webDeployMonitor.start();
     startDevelopmentSourceWatcher();
-    if (app.isPackaged) {
+    if (app.isPackaged && autoUpdater) {
       autoUpdater.logger = { info: (m) => writeDesktopLog('updater:info', m), warn: (m) => writeDesktopLog('updater:warn', m), error: (m) => writeDesktopLog('updater:error', m) };
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = true;
@@ -1809,6 +1989,8 @@ if (!gotSingleInstanceLock) {
       });
       setTimeout(() => { autoUpdater.checkForUpdates().catch(() => {}); }, 10000);
       setInterval(() => { autoUpdater.checkForUpdates().catch(() => {}); }, AUTO_UPDATE_CHECK_INTERVAL_MS);
+    } else if (IS_MICROSOFT_STORE_BUILD) {
+      writeDesktopLog('Microsoft Store distribution: electron-updater disabled');
     } else {
       writeDesktopLog('development mode: release updater disabled');
     }
