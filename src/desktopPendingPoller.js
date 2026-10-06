@@ -1,6 +1,11 @@
+const http = require('http');
+const https = require('https');
+
 const DEFAULT_POLL_INTERVAL_MS = 15000;
 const DEFAULT_REMINDER_INTERVAL_MS = 300000;
 const PAGE_DIRECT_DEDUPLICATION_MS = 45000;
+const REQUEST_TIMEOUT_MS = 15000;
+const MAX_RESPONSE_BYTES = 1024 * 1024;
 
 const CATEGORY_COPY = {
   liveSupport: { title: 'Destek Bildirimi', label: 'destek talebi', sourceLabel: 'Destek', sourceInitials: 'DS' },
@@ -91,6 +96,66 @@ function getReservationGuestName(item) {
     || ''
   );
   return String(summary.match(/(?:^|\||\s)(?:name=|Guest:\s*)([^|\r\n]+)/i)?.[1] || '').trim();
+}
+
+function requestPendingSummary(apiBaseUrl, token) {
+  return new Promise((resolve, reject) => {
+    let requestUrl;
+    try {
+      requestUrl = new URL(`${apiBaseUrl}/api/admin/desktop-notifications/pending`);
+    } catch (_) {
+      reject(new Error('pending_url_invalid'));
+      return;
+    }
+
+    const transport = requestUrl.protocol === 'https:' ? https : requestUrl.protocol === 'http:' ? http : null;
+    if (!transport) {
+      reject(new Error('pending_protocol_unsupported'));
+      return;
+    }
+
+    const request = transport.request(requestUrl, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json'
+      }
+    }, (response) => {
+      const statusCode = Number(response.statusCode || 0);
+      if (statusCode < 200 || statusCode >= 300) {
+        response.resume();
+        reject(new Error(`${statusCode === 401 || statusCode === 403 ? 'auth' : 'http'}_${statusCode || 'unknown'}`));
+        return;
+      }
+
+      let totalBytes = 0;
+      const chunks = [];
+      response.on('data', (chunk) => {
+        totalBytes += chunk.length;
+        if (totalBytes > MAX_RESPONSE_BYTES) {
+          request.destroy(new Error('pending_response_too_large'));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.on('error', reject);
+      response.on('aborted', () => reject(new Error('pending_response_aborted')));
+      response.on('end', () => {
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+        } catch (_) {
+          reject(new Error('pending_json_invalid'));
+        }
+      });
+    });
+
+    const timeout = setTimeout(() => {
+      request.destroy(new Error('pending_request_timeout'));
+    }, REQUEST_TIMEOUT_MS);
+    request.on('close', () => clearTimeout(timeout));
+    request.on('error', reject);
+    request.end();
+  });
 }
 
 function createDesktopPendingPoller({
@@ -197,25 +262,11 @@ function createDesktopPendingPoller({
     }
 
     inFlight = true;
+    const startedAt = Date.now();
+    const previousError = lastError;
 
     try {
-      const response = await fetch(`${apiBaseUrl}/api/admin/desktop-notifications/pending`, {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${authToken}`,
-          Accept: 'application/json'
-        }
-      });
-
-      if (response.status === 401 || response.status === 403) {
-        throw new Error(`auth_${response.status}`);
-      }
-
-      if (!response.ok) {
-        throw new Error(`http_${response.status}`);
-      }
-
-      const payload = await response.json();
+      const payload = await requestPendingSummary(apiBaseUrl, authToken);
       const sources = Array.isArray(payload.sources) ? payload.sources : [];
       const nextCounts = new Map();
       const nextSources = new Map();
@@ -306,6 +357,7 @@ function createDesktopPendingPoller({
 
       writeLog('pending poll', {
         totalPending,
+        durationMs: Date.now() - startedAt,
         trigger: newPendingEntries.length > 0 ? 'new_request' : reminderDue ? 'reminder_panel_only' : 'none',
         sources: sources.map((source) => ({ key: source.key || `${source.category}:${source.tab}`, category: source.category, count: Number(source.count) || 0 })),
         newPendingIds: newPendingEntries.map(({ source, item, index }) => getPendingItemKey(source.key || `${source.category}:${source.tab}`, item, index)),
@@ -321,8 +373,20 @@ function createDesktopPendingPoller({
       lastTotalPending = totalPending;
       lastError = null;
       hasCompletedInitialPoll = true;
+      if (previousError) {
+        writeLog('pending poll recovered', { previousError, brand, durationMs: Date.now() - startedAt });
+      }
     } catch (error) {
       lastError = error?.message || 'poll_failed';
+      if (lastError !== previousError) {
+        writeLog('pending poll failed', {
+          error: lastError,
+          brand,
+          durationMs: Date.now() - startedAt,
+          arch: process.arch,
+          nodeVersion: process.versions.node
+        });
+      }
       if (lastError.startsWith('auth_')) {
         authToken = null;
         previousCounts = new Map();
