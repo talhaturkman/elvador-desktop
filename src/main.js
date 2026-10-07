@@ -1097,7 +1097,9 @@ function shouldOpenInsideApp(url) {
   try {
     const baseUrl = new URL(config.adminUrl);
     const nextUrl = new URL(url);
-    return nextUrl.origin === baseUrl.origin;
+    const isPanelPath = nextUrl.pathname === baseUrl.pathname
+      || /^\/(?:admin(?:\/|$)|[^/]+\/admin(?:\/|$)|admin-access\/[^/]+\/?$)/.test(nextUrl.pathname);
+    return nextUrl.origin === baseUrl.origin && isPanelPath;
   } catch (_) {
     return false;
   }
@@ -1369,11 +1371,6 @@ function createMainWindow(initialUrl = getStartupUrl()) {
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (shouldOpenInsideApp(url)) {
-      openInApp(url);
-      return { action: 'deny' };
-    }
-
     shell.openExternal(url);
     return { action: 'deny' };
   });

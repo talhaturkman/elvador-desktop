@@ -29,6 +29,7 @@ This app uses `electron-updater` with GitHub Releases for automatic updates. Eve
 
 ## Key Behaviors
 
+- 2026-10-07: New-window links always open in the default browser, including same-origin Elvador conversation links; reopening them in the main window replaced the staff panel. Same-window navigation keeps only same-origin admin/configured panel and admin-access routes inside; other pages open externally.
 - Notification click navigates via `history.pushState` (no page reload) when already on same origin.
 - Panel visual notification fallback: MutationObserver watches `.admin-visual-alert-ribbon` in DOM.
 - Desktop pending poller polls `/api/admin/desktop-notifications/pending` every 15s.
