@@ -184,7 +184,8 @@ const gotSingleInstanceLock = isStoreUpdaterSmokeTest || app.requestSingleInstan
 const logDirectory = earlyLogDirectory;
 const logFilePath = earlyLogFilePath;
 const DESKTOP_ONBOARDING_URL = 'elvador-desktop://onboarding';
-const AUTO_UPDATE_CHECK_INTERVAL_MS = 60 * 1000;
+// 2026-10-11: Poll installer releases hourly to avoid repeated unchanged-version checks between updates.
+const AUTO_UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
 let mainWindow = null;
 let tray = null;

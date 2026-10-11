@@ -1,7 +1,8 @@
 const DEFAULT_ADMIN_URL = 'https://chat.elvador.com/admin';
 const DEFAULT_PROTOCOL = 'elvador';
 const DEFAULT_NOTIFICATION_REMINDER_MS = 300000;
-const DEFAULT_WEB_DEPLOY_CHECK_INTERVAL_MS = 60000;
+// 2026-10-11: Check web builds hourly; minute-by-minute polling repeated the same version while idle.
+const DEFAULT_WEB_DEPLOY_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 const DEFAULT_WEB_DEPLOY_REQUEST_TIMEOUT_MS = 15000;
 
 function normalizeAdminUrl(value) {

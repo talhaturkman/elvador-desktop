@@ -1,7 +1,7 @@
 const http = require('http');
 const https = require('https');
 
-const DEFAULT_CHECK_INTERVAL_MS = 60 * 1000;
+const DEFAULT_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15 * 1000;
 const MAX_RESPONSE_BYTES = 32 * 1024;
 
