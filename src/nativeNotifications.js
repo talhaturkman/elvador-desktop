@@ -359,12 +359,17 @@ function getCompactNotificationIcon(category) {
 }
 
 function buildOverlayHtml(notification) {
+  const custom = notification.customization || {};
   const id = escapeHtml(notification.id);
+  // 2026-10-14: Minimal/standard samples hid the preview caption and looked
+  // like real requests. Mark the short message in every preview composition.
   const message = escapeHtml(
-    COMPACT_NOTIFICATION_COPY[notification.category] || COMPACT_NOTIFICATION_COPY.default
+    (notification.preview ? 'Önizleme · ' : '') + (COMPACT_NOTIFICATION_COPY[notification.category] || COMPACT_NOTIFICATION_COPY.default)
   );
   const accentColor = sanitizeColor(notification.accentColor, CATEGORY_UI.default.accent);
   const notificationIcon = getCompactNotificationIcon(notification.category);
+  const design = custom.design || 'existing';
+  const caption = escapeHtml(notification.preview ? 'Önizleme' : notification.sourceLabel);
 
   return `
 <!doctype html>
@@ -381,20 +386,29 @@ function buildOverlayHtml(notification) {
         height: 100vh;
         display: flex;
         align-items: center;
-        gap: 10px;
-        padding: 10px 8px 10px 12px;
+        gap: ${custom.padding ? Math.round(custom.padding * .7) : 10}px;
+        padding: ${custom.padding || 10}px 8px ${custom.padding || 10}px ${custom.padding || 12}px;
         border: 1px solid rgba(255, 255, 255, 0.16);
-        border-left: 4px solid ${accentColor};
-        border-radius: 10px;
-        background: rgba(24, 24, 27, 0.98);
+        border-left: 4px solid ${custom.accent || accentColor};
+        border-radius: ${custom.radius ?? 10}px;
+        background: ${custom.background || 'rgba(24, 24, 27, 0.98)'};
         box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
-        color: #ffffff;
+        color: ${custom.text || '#ffffff'};
         cursor: pointer;
-        animation: notification-spawn 220ms ease-out both;
+        animation: ${custom.animation === 'none' ? 'none' : custom.animation === 'fade' ? 'notification-fade 220ms ease-out both' : 'notification-spawn 220ms ease-out both'};
       }
-      .icon { display: flex; flex: 0 0 22px; width: 22px; height: 22px; color: ${accentColor}; }
-      .icon svg { width: 22px; height: 22px; }
-      .message { flex: 1; min-width: 0; overflow: hidden; color: #ffffff; font-size: 15px; font-weight: 650; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
+      .icon { display: flex; flex: 0 0 ${custom.iconSize || 22}px; width: ${custom.iconSize || 22}px; height: ${custom.iconSize || 22}px; color: ${custom.accent || accentColor}; }
+      .icon svg { width: 100%; height: 100%; }
+      .message { display: block; flex: 1; min-width: 0; overflow: hidden; color: ${custom.text || '#ffffff'}; font-size: ${Math.min(36, (custom.fontSize || 15) * (custom.scale || 1))}px; font-weight: 650; line-height: ${custom.fontSize || custom.scale ? '1.3' : '20px'}; text-overflow: ellipsis; white-space: nowrap; }
+      @keyframes notification-fade { from { opacity: 0; } to { opacity: 1; } }
+      @media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
+      .copy { flex: 1; min-width: 0; }
+      .caption { display: none; font-size: 11px; opacity: .75; margin-bottom: 4px; }
+      .toast[data-design="minimal"] { border-left-width: 1px; box-shadow: none; padding-left: 10px; }
+      .toast[data-design="cards"] { align-items: center; padding: 12px; border-left-width: 1px; border-top: 3px solid ${custom.accent || accentColor}; }
+      .toast[data-design="cards"] .caption { display: block; }
+      .toast[data-design="cards"] .icon { width: 32px; height: 32px; flex-basis: 32px; }
+      .toast[data-design="strip"] { border-left-width: 1px; border-bottom: 3px solid ${custom.accent || accentColor}; padding: 6px 8px; border-radius: ${custom.radius ?? 4}px; }
       .close-button {
         width: 30px;
         height: 30px;
@@ -402,14 +416,14 @@ function buildOverlayHtml(notification) {
         border: 0;
         border-radius: 6px;
         background: transparent;
-        color: rgba(255, 255, 255, 0.76);
+        color: ${custom.text || 'rgba(255, 255, 255, 0.76)'};
         cursor: pointer;
         display: inline-flex;
         align-items: center;
         justify-content: center;
         flex: 0 0 30px;
       }
-      .close-button:hover, .close-button:focus-visible { background: rgba(255, 255, 255, 0.12); color: #ffffff; outline: none; }
+      .close-button:hover, .close-button:focus-visible { background: rgba(255, 255, 255, 0.12); color: ${custom.text || '#ffffff'}; outline: none; }
       .close-button svg { width: 18px; height: 18px; }
       @keyframes notification-spawn {
         from { opacity: 0; translate: 0 12px; }
@@ -418,9 +432,9 @@ function buildOverlayHtml(notification) {
     </style>
   </head>
   <body>
-    <main class="toast" role="button" tabindex="0" data-id="${id}">
+    <main class="toast" role="button" tabindex="0" data-id="${id}" data-design="${design}">
       <span class="icon" aria-hidden="true">${notificationIcon}</span>
-      <span class="message">${message}</span>
+      <span class="copy"><span class="caption">${caption}</span><span class="message">${message}</span></span>
       <button class="close-button" type="button" aria-label="Bildirimi kapat">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="m6 6 12 12M18 6 6 18"/></svg>
       </button>
@@ -464,6 +478,69 @@ function createNativeNotificationService({
   const recentlyOpenedNotifications = new Map();
   const recentlyOpenedFingerprints = new Map();
   const minimizedNotificationIds = new Set();
+  let customization = null;
+  let previewRecord = null;
+  const previewId = '__ui-customization-preview__';
+  const customizationType = category => ({ orders: 'ordersRequests', conversation: 'analyticsConversations', spa: 'spaRequests', upsell: 'upsellRequests' }[category] || category);
+  const resolveCustomization = category => ({ ...customization?.notifications?.general, ...customization?.notifications?.types?.[customizationType(category)] });
+  function setCustomization(preferences) {
+    if (JSON.stringify(customization) !== JSON.stringify(preferences)) closeCustomizationPreview();
+    customization = preferences;
+    // New arrivals, including the independent native poller, use the same
+    // personal settings. Existing visible cards finish their original lifecycle.
+  }
+  function overlayDimensions(custom, workArea) {
+    const designHeight = custom.design === 'cards' ? 96 : custom.design === 'strip' ? 44 : custom.design === 'minimal' ? 48 : OVERLAY_HEIGHT;
+    return {
+      width: Math.min(workArea.width - OVERLAY_MARGIN * 2, Math.round((custom.width || OVERLAY_WIDTH) * (custom.scale || 1))),
+      height: Math.min(Math.floor((workArea.height - OVERLAY_MARGIN * 2 - OVERLAY_GAP * 2) / 3), Math.max(designHeight, Math.round((custom.fontSize || 15) * (custom.scale || 1) * 1.3 + (custom.padding ? custom.padding * 2 : 30) + (custom.design === 'cards' ? 19 : 0)), (custom.iconSize || 22) + (custom.padding || 10) * 2))
+    };
+  }
+  function placePreview() {
+    if (!previewRecord?.overlayWindow || previewRecord.overlayWindow.isDestroyed()) return;
+    const workArea = screen.getPrimaryDisplay().workArea;
+    const custom = previewRecord.payload.customization;
+    const { width, height } = overlayDimensions(custom, workArea);
+    const position = custom.position || 'bottom-right';
+    previewRecord.overlayWindow.setBounds({ width, height,
+      x: Math.round(position === 'center' ? workArea.x + (workArea.width - width) / 2 : position.endsWith('left') ? workArea.x + 12 : workArea.x + workArea.width - width - 12),
+      y: Math.round(position === 'center' ? workArea.y + (workArea.height - height) / 2 : position.startsWith('top') ? workArea.y + 12 : workArea.y + workArea.height - height - 12) });
+  }
+  function closeCustomizationPreview() {
+    if (previewRecord) closeRecord(previewRecord);
+    previewRecord = null;
+  }
+  function showCustomizationPreview(preferences, category, previewRequestId) {
+    closeCustomizationPreview();
+    const nativeCategory = { ordersRequests: 'orders', analyticsConversations: 'conversation', spaRequests: 'spa', upsellRequests: 'upsell' }[category] || category;
+    const payload = sanitizeNotificationPayload({ id: previewId, category: nativeCategory, title: 'Bildirim önizlemesi', count: 1, playSound: false });
+    payload.customization = { ...preferences.notifications.general, ...preferences.notifications.types[customizationType(payload.category)] };
+    if (payload.customization.position === 'existing') delete payload.customization.position;
+    payload.preview = true;
+    previewRecord = { payload, preview: true, overlayWindow: null, createdAt: Date.now(), isClosing: false };
+    previewRecord.overlayWindow = createOverlayWindow(previewRecord);
+    writeLog('notification customization preview started', { previewRequestId, category: payload.category, design: payload.customization.design || 'existing' });
+    return { shown: true, preview: true };
+  }
+  function armDuration(record) {
+    const duration = record.payload.customization?.duration;
+    if (!duration) return;
+    const deadline = Date.now() + duration * 1000;
+    record.durationDeadline = deadline;
+    const expire = () => {
+      if (record.isClosing) return;
+      if (Date.now() < deadline) { record.durationTimer = setTimeout(expire, deadline - Date.now()); return; }
+      if (record.preview) closeCustomizationPreview();
+      else {
+        if (activeNotifications.get(record.payload.id) !== record) return;
+        activeNotifications.delete(record.payload.id);
+        minimizedNotificationIds.add(record.payload.id);
+        closeRecord(record); emitChange(); repositionOverlays();
+      }
+      writeLog('notification customization duration elapsed', { category: record.payload.category, preview: Boolean(record.preview), duration });
+    };
+    record.durationTimer = setTimeout(expire, duration * 1000);
+  }
 
   function emitChange() {
     onChange({
@@ -549,14 +626,25 @@ function createNativeNotificationService({
       .filter((record) => record.overlayWindow && !record.overlayWindow.isDestroyed())
       .sort((left, right) => left.createdAt - right.createdAt);
 
-    records.forEach((record, index) => {
-      const x = Math.round(workArea.x + workArea.width - OVERLAY_WIDTH - OVERLAY_MARGIN);
-      const y = Math.round(workArea.y + workArea.height - OVERLAY_HEIGHT - OVERLAY_MARGIN - (index * (OVERLAY_HEIGHT + OVERLAY_GAP)));
+    const stackOffsets = new Map();
+    const stackHeight = records.reduce((height, record) => {
+      return height + overlayDimensions(record.payload.customization || {}, workArea).height + OVERLAY_GAP;
+    }, -OVERLAY_GAP);
+    records.forEach((record) => {
+      const custom = record.payload.customization || {};
+      const { width, height } = overlayDimensions(custom, workArea);
+      const position = custom.position || 'bottom-right';
+      // Type-specific corners stack independently; a left-side message must
+      // not leave an empty gap beneath unrelated right-side orders.
+      const stackOffset = stackOffsets.get(position) || 0;
+      const x = Math.round(position === 'center' ? workArea.x + (workArea.width - width) / 2 : position.endsWith('left') ? workArea.x + OVERLAY_MARGIN : workArea.x + workArea.width - width - OVERLAY_MARGIN);
+      const y = Math.round(position === 'center' ? workArea.y + (workArea.height - stackHeight) / 2 + stackOffset : position.startsWith('top') ? workArea.y + OVERLAY_MARGIN + stackOffset : workArea.y + workArea.height - height - OVERLAY_MARGIN - stackOffset);
+      stackOffsets.set(position, stackOffset + height + OVERLAY_GAP);
       record.overlayWindow.setBounds({
         x,
         y: Math.max(workArea.y + OVERLAY_MARGIN, y),
-        width: OVERLAY_WIDTH,
-        height: OVERLAY_HEIGHT
+        width,
+        height
       });
     });
   }
@@ -567,6 +655,7 @@ function createNativeNotificationService({
     }
 
     record.isClosing = true;
+    clearTimeout(record.durationTimer);
     if (record.overlayWindow && !record.overlayWindow.isDestroyed()) {
       record.overlayWindow.close();
     }
@@ -632,11 +721,13 @@ function createNativeNotificationService({
 
   ipcMain.removeAllListeners(OVERLAY_CHANNEL_OPEN);
   ipcMain.on(OVERLAY_CHANNEL_OPEN, (_event, notificationId) => {
+    if (notificationId === previewId) { if (_event.sender === previewRecord?.overlayWindow?.webContents) closeCustomizationPreview(); return; }
     openNotification(String(notificationId || ''));
   });
 
   ipcMain.removeAllListeners(OVERLAY_CHANNEL_MINIMIZE);
   ipcMain.on(OVERLAY_CHANNEL_MINIMIZE, (_event, notificationId) => {
+    if (notificationId === previewId) { if (_event.sender === previewRecord?.overlayWindow?.webContents) closeCustomizationPreview(); return; }
     const record = activeNotifications.get(String(notificationId || ''));
     if (!record) {
       return;
@@ -688,18 +779,23 @@ function createNativeNotificationService({
     overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
     overlayWindow.once('ready-to-show', () => {
+      if (record.isClosing || overlayWindow.isDestroyed()) return;
       writeLog('notification overlay ready', {
         id: record.payload.id,
         title: record.payload.title,
         category: record.payload.category
       });
-      repositionOverlays();
+      if (record.preview) placePreview(); else repositionOverlays();
       overlayWindow.showInactive();
       overlayWindow.moveTop();
+      // 2026-10-13: Count visibility duration from ready/show, not from slow
+      // window creation. Preview uses the same window/timer without pending IDs.
+      armDuration(record);
     });
 
     overlayWindow.on('closed', () => {
       record.overlayWindow = null;
+      if (record.preview) { clearTimeout(record.durationTimer); if (previewRecord === record) previewRecord = null; return; }
       if (!record.isClosing) {
         activeNotifications.delete(record.payload.id);
         emitChange();
@@ -719,6 +815,10 @@ function createNativeNotificationService({
 
   function showNotification(payload = {}) {
     const normalized = sanitizeNotificationPayload(payload);
+    normalized.customization = resolveCustomization(normalized.category);
+    if (normalized.customization.position === 'existing') delete normalized.customization.position;
+    payload = { ...payload, ...Object.fromEntries(['profile', 'soundTone', 'volume'].filter(key => normalized.customization[key] !== undefined).map(key => [key, normalized.customization[key]])) };
+    if (normalized.customization.volume === 0) normalized.playSound = false;
     if (minimizedNotificationIds.has(normalized.id)) {
       writeLog('notification suppressed after minimize to panel', {
         id: normalized.id,
@@ -855,6 +955,7 @@ function createNativeNotificationService({
   }
 
   function clearAll() {
+    closeCustomizationPreview();
     const hadNotifications = activeNotifications.size > 0;
     for (const record of activeNotifications.values()) {
       closeRecord(record);
@@ -942,6 +1043,9 @@ function createNativeNotificationService({
   }
 
   return {
+    showCustomizationPreview,
+    closeCustomizationPreview,
+    setCustomization,
     showNotification,
     dismissNotification,
     acknowledgeNotification,

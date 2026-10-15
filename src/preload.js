@@ -673,6 +673,10 @@ function reportWebDeployReloadFromSession() {
 
 contextBridge.exposeInMainWorld('elvadorDesktop', {
   isDesktopShell: true,
+  customizationVersion: 3,
+  previewUiCustomization: (payload) => ipcRenderer.invoke('elvador:preview-ui-customization', payload),
+  closeUiCustomizationPreview: () => ipcRenderer.invoke('elvador:close-ui-customization-preview'),
+  setUiCustomization: (preferences) => ipcRenderer.invoke('elvador:set-ui-customization', preferences),
   platform: process.platform,
   getInfo: () => ipcRenderer.invoke('elvador:get-desktop-info'),
   syncAdminSession: (session) => ipcRenderer.invoke('elvador:sync-admin-session', session),

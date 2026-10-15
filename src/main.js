@@ -1687,6 +1687,32 @@ function isInternalOnboardingSender(event) {
 }
 
 function registerIpcHandlers() {
+  let customizationOwner = '';
+  let previewGeneration = 0;
+  ipcMain.handle('elvador:preview-ui-customization', async (event, payload = {}) => {
+    if (event.sender !== mainWindow?.webContents || event.senderFrame !== mainWindow.webContents.mainFrame || JSON.stringify(payload).length > 12000) return { shown: false };
+    const owner = customizationOwner;
+    const generation = ++previewGeneration;
+    const { desktopNotificationPresentation } = await import('./uiCustomization.mjs');
+    if (owner !== customizationOwner || generation !== previewGeneration) return { shown: false };
+    const previewRequestId = typeof payload.previewRequestId === 'string' && /^[\w-]{1,80}$/.test(payload.previewRequestId) ? payload.previewRequestId : undefined;
+    return notificationService?.showCustomizationPreview(desktopNotificationPresentation(payload.preferences), payload.category, previewRequestId) || { shown: false };
+  });
+  ipcMain.handle('elvador:close-ui-customization-preview', event => {
+    if (event.sender !== mainWindow?.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) return { ok: false };
+    previewGeneration++;
+    notificationService?.closeCustomizationPreview(); return { ok: true };
+  });
+  ipcMain.handle('elvador:set-ui-customization', async (event, preferences) => {
+    if (event.sender !== mainWindow?.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) return { ok: false };
+    if (JSON.stringify(preferences || {}).length > 12000) return { ok: false };
+    const owner = customizationOwner;
+    const { desktopNotificationPresentation, CUSTOMIZATION_VERSION } = await import('./uiCustomization.mjs');
+    if (owner !== customizationOwner) return { ok: false };
+    notificationService?.setCustomization(desktopNotificationPresentation(preferences));
+    writeDesktopLog('notification customization applied', { version: CUSTOMIZATION_VERSION });
+    return { ok: true };
+  });
   ipcMain.on('elvador:notification-trace', (event, traceEvent, details = {}) => {
     if (event.sender !== mainWindow?.webContents) {
       return;
@@ -1709,12 +1735,16 @@ function registerIpcHandlers() {
   }));
 
   ipcMain.handle('elvador:sync-admin-session', (_event, session = {}) => {
+    const owner = `${session.brand || ''}:${session.adminUserId || session.user?.adminUserId || session.username || ''}`;
+    if (owner !== customizationOwner) { notificationService?.setCustomization(null); customizationOwner = owner; }
     pendingPoller?.start(session);
     refreshTrayMenu();
     return { ok: true, pendingPollerState: pendingPoller?.getState() || null };
   });
 
   ipcMain.handle('elvador:clear-admin-session', () => {
+    notificationService?.setCustomization(null);
+    customizationOwner = '';
     pendingPoller?.stop();
     refreshTrayMenu();
     return { ok: true };
