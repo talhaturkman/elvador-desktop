@@ -1,5 +1,6 @@
 const path = require('path');
 const fs = require('fs');
+const { pathToFileURL } = require('url');
 
 const earlyLogDirectory = path.join(process.env.APPDATA || process.cwd(), 'Elvador');
 const earlyLogFilePath = path.join(earlyLogDirectory, 'desktop.log');
@@ -1686,6 +1687,25 @@ function isInternalOnboardingSender(event) {
   return String(senderUrl).startsWith('data:text/html');
 }
 
+async function loadCustomizationModule() {
+  // 2026-10-15: Electron 22 ia32 cannot import ESM from ASAR, so installed
+  // size preferences and previews must load the explicitly unpacked contract.
+  const modulePath = app.isPackaged
+    ? path.join(process.resourcesPath, 'app.asar.unpacked', 'src', 'uiCustomization.mjs')
+    : path.join(__dirname, 'uiCustomization.mjs');
+  try {
+    return await import(pathToFileURL(modulePath).href);
+  } catch (error) {
+    writeDesktopLog('notification customization module failed', {
+      code: error.code || null,
+      message: error.message,
+      arch: process.arch,
+      electronVersion: process.versions.electron
+    });
+    throw error;
+  }
+}
+
 function registerIpcHandlers() {
   let customizationOwner = '';
   let previewGeneration = 0;
@@ -1693,7 +1713,7 @@ function registerIpcHandlers() {
     if (event.sender !== mainWindow?.webContents || event.senderFrame !== mainWindow.webContents.mainFrame || JSON.stringify(payload).length > 12000) return { shown: false };
     const owner = customizationOwner;
     const generation = ++previewGeneration;
-    const { desktopNotificationPresentation } = await import('./uiCustomization.mjs');
+    const { desktopNotificationPresentation } = await loadCustomizationModule();
     if (owner !== customizationOwner || generation !== previewGeneration) return { shown: false };
     const previewRequestId = typeof payload.previewRequestId === 'string' && /^[\w-]{1,80}$/.test(payload.previewRequestId) ? payload.previewRequestId : undefined;
     return notificationService?.showCustomizationPreview(desktopNotificationPresentation(payload.preferences), payload.category, previewRequestId) || { shown: false };
@@ -1707,7 +1727,7 @@ function registerIpcHandlers() {
     if (event.sender !== mainWindow?.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) return { ok: false };
     if (JSON.stringify(preferences || {}).length > 12000) return { ok: false };
     const owner = customizationOwner;
-    const { desktopNotificationPresentation, CUSTOMIZATION_VERSION } = await import('./uiCustomization.mjs');
+    const { desktopNotificationPresentation, CUSTOMIZATION_VERSION } = await loadCustomizationModule();
     if (owner !== customizationOwner) return { ok: false };
     notificationService?.setCustomization(desktopNotificationPresentation(preferences));
     writeDesktopLog('notification customization applied', { version: CUSTOMIZATION_VERSION });
