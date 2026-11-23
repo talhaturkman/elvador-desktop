@@ -145,6 +145,8 @@ writeEarlyDesktopLog('main file entered', {
   previousStartupStatus: previousStartupState?.status || null
 });
 
+const http = require('http');
+const https = require('https');
 const {
   app,
   BrowserWindow,
@@ -153,6 +155,7 @@ const {
   globalShortcut,
   ipcMain,
   nativeImage,
+  safeStorage,
   screen,
   shell
 } = require('electron');
@@ -168,6 +171,11 @@ const { getDesktopConfig } = require('./config');
 const { createNativeNotificationService } = require('./nativeNotifications');
 const { createNativeNotificationSoundService } = require('./nativeNotificationSound');
 const { createDesktopPendingPoller } = require('./desktopPendingPoller');
+const { createOfflineApiCache } = require('./offlineApiCache');
+const { createOfflineOutboxStore } = require('./offlineOutboxStore');
+const { createOfflineOutboxSync } = require('./offlineOutboxSync');
+const { applyOfflineWrite, replayOutboxOnCache } = require('./offlineOptimisticMutator');
+const { createOfflinePrefetcher } = require('./offlinePrefetcher');
 const { createWebDeployMonitor } = require('./webDeployMonitor');
 
 if (!app.isPackaged) {
@@ -193,7 +201,14 @@ let tray = null;
 let notificationService = null;
 let notificationSoundService = null;
 let pendingPoller = null;
+let offlineApiCache = null;
+let offlineOutboxStore = null;
+let offlineOutboxSync = null;
+let offlinePrefetcher = null;
 let webDeployMonitor = null;
+let manualOfflineSimulation = false;
+let activeSessionBrand = '';
+let lastAdminSession = null;
 let isQuitting = false;
 let webDeployReloadInProgress = false;
 let lastLoadError = null;
@@ -265,6 +280,24 @@ function writeNotificationTrace(event, details = {}) {
   }
 }
 
+function collectSourceSignatures(directoryPath, map = new Map()) {
+  const entries = fs.readdirSync(directoryPath, { withFileTypes: true });
+  for (const entry of entries) {
+    const entryPath = path.join(directoryPath, entry.name);
+    if (entry.isDirectory()) {
+      collectSourceSignatures(entryPath, map);
+    } else if (entry.isFile()) {
+      try {
+        const stat = fs.statSync(entryPath);
+        map.set(entryPath, `${stat.mtimeMs}:${stat.size}`);
+      } catch (_) {
+        // Ignore transient unreadable files during dev snapshot.
+      }
+    }
+  }
+  return map;
+}
+
 function startDevelopmentSourceWatcher() {
   if (app.isPackaged || developmentSourceWatcher) {
     return;
@@ -272,9 +305,32 @@ function startDevelopmentSourceWatcher() {
 
   try {
     const sourceDirectory = path.join(__dirname);
+    const knownFileStats = collectSourceSignatures(sourceDirectory);
     developmentSourceWatcher = fs.watch(sourceDirectory, { recursive: true }, (_eventType, filename) => {
       if (!filename || isQuitting) {
         return;
+      }
+
+      const fullPath = path.join(sourceDirectory, filename);
+      try {
+        const stat = fs.statSync(fullPath);
+        if (!stat.isFile()) {
+          return;
+        }
+        const nextSignature = `${stat.mtimeMs}:${stat.size}`;
+        if (knownFileStats.get(fullPath) === nextSignature) {
+          // 2026-11-23: Windows fs.watch emits metadata/access notifications when Node
+          // requires a file (e.g. offlinePmsPreload.js), which previously relaunched the app.
+          return;
+        }
+        knownFileStats.set(fullPath, nextSignature);
+      } catch (statError) {
+        if (statError?.code === 'ENOENT') {
+          if (!knownFileStats.has(fullPath)) {
+            return;
+          }
+          knownFileStats.delete(fullPath);
+        }
       }
 
       clearTimeout(developmentReloadTimer);
@@ -1034,6 +1090,11 @@ function navigateInPage(targetUrl) {
 }
 
 function openInApp(rawUrl) {
+  if (manualOfflineSimulation) {
+    manualOfflineSimulation = false;
+    refreshTrayMenu();
+    broadcastOfflineState();
+  }
   if (rawUrl === DESKTOP_ONBOARDING_URL) {
     if (!mainWindow) {
       createMainWindow(DESKTOP_ONBOARDING_URL);
@@ -1089,6 +1150,151 @@ function parseLaunchUrl(rawValue) {
   } catch (_) {
     return null;
   }
+}
+
+function isAdminPanelSender(event) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return false;
+  }
+  if (event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) {
+    return false;
+  }
+  const senderUrl = event.senderFrame?.url || event.sender?.getURL?.() || '';
+  try {
+    const parsed = new URL(senderUrl);
+    const adminOrigin = new URL(config.adminUrl).origin;
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.origin === adminOrigin;
+  } catch (_) {
+    return false;
+  }
+}
+
+function getOfflineStateSnapshot() {
+  return {
+    offline: manualOfflineSimulation,
+    simulatedOffline: manualOfflineSimulation,
+    apiBaseUrl: config.apiBaseUrl,
+    meta: offlineApiCache?.getMeta() || null,
+    outboxSummary: offlineOutboxStore?.getSummary() || { pendingCount: 0, conflictCount: 0, totalCount: 0, syncing: false }
+  };
+}
+
+function broadcastOfflineState() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('elvador:offline-state-changed', getOfflineStateSnapshot());
+  }
+}
+
+function setManualOfflineMode(enabled, reason = 'manual') {
+  const nextEnabled = Boolean(enabled);
+  manualOfflineSimulation = nextEnabled;
+  if (nextEnabled) {
+    pendingPoller?.stop();
+    offlinePrefetcher?.stop();
+    offlineOutboxSync?.stop();
+  }
+  writeDesktopLog('offline panel mode changed', { enabled: nextEnabled, reason });
+  refreshTrayMenu();
+  broadcastOfflineState();
+  if (!nextEnabled && mainWindow && !mainWindow.isDestroyed()) {
+    const pendingCount = offlineOutboxStore?.getSummary()?.pendingCount || 0;
+    if (lastAdminSession?.token) {
+      pendingPoller?.start(lastAdminSession);
+      offlinePrefetcher?.start(lastAdminSession);
+      offlineOutboxSync?.start(lastAdminSession);
+    }
+    const finishLiveReload = () => {
+      if (!mainWindow || mainWindow.isDestroyed() || manualOfflineSimulation) return;
+      if (isWindowOnSameOrigin()) {
+        mainWindow.webContents.reload();
+      } else {
+        openInApp(getStartupUrl());
+      }
+    };
+    if (pendingCount > 0 && lastAdminSession?.token && offlineOutboxSync) {
+      void offlineOutboxSync.syncPending().finally(finishLiveReload);
+    } else {
+      finishLiveReload();
+    }
+  }
+  return true;
+}
+
+function shouldBlockRequestInManualOffline(rawUrl, adminOrigin) {
+  if (!rawUrl) {
+    return false;
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch (_) {
+    return true;
+  }
+
+  if (parsed.protocol === 'ws:' || parsed.protocol === 'wss:') {
+    return true;
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return false;
+  }
+
+  if (parsed.origin !== adminOrigin) {
+    return true;
+  }
+
+  if (parsed.pathname.startsWith('/api/') || parsed.pathname.startsWith('/socket.io/')) {
+    return true;
+  }
+
+  return false;
+}
+
+function checkOnlineReachability(targetUrl, timeoutMs = 4000) {
+  return new Promise((resolve) => {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(targetUrl);
+    } catch (_) {
+      resolve({ online: false });
+      return;
+    }
+
+    const transport = parsedUrl.protocol === 'https:' ? https : parsedUrl.protocol === 'http:' ? http : null;
+    if (!transport) {
+      resolve({ online: false });
+      return;
+    }
+
+    let settled = false;
+    const finish = (online) => {
+      if (settled) return;
+      settled = true;
+      resolve({ online });
+    };
+
+    const request = transport.request(parsedUrl, {
+      method: 'GET',
+      headers: {
+        'Cache-Control': 'no-cache',
+        Pragma: 'no-cache'
+      }
+    }, (response) => {
+      const statusCode = Number(response.statusCode || 0);
+      response.resume();
+      request.destroy();
+      finish(statusCode >= 200 && statusCode < 500);
+    });
+
+    const timer = setTimeout(() => {
+      request.destroy();
+      finish(false);
+    }, timeoutMs);
+    request.on('close', () => clearTimeout(timer));
+    request.on('error', () => finish(false));
+    request.end();
+  });
 }
 
 function shouldOpenInsideApp(url) {
@@ -1292,8 +1498,16 @@ function createMainWindow(initialUrl = getStartupUrl()) {
       {
         label: 'QR/Link Sıfırla',
         click: () => {
+          manualOfflineSimulation = false;
+          activeSessionBrand = '';
+          lastAdminSession = null;
           clearAdminAccessUrl();
           pendingPoller?.stop();
+          offlinePrefetcher?.stop();
+          offlineOutboxSync?.stop();
+          offlineApiCache?.clear();
+          offlineOutboxStore?.clear();
+          refreshTrayMenu();
           loadDesktopOnboardingPage();
         }
       },
@@ -1384,6 +1598,15 @@ function createMainWindow(initialUrl = getStartupUrl()) {
 
     event.preventDefault();
     shell.openExternal(url);
+  });
+
+  const adminOrigin = new URL(config.adminUrl).origin;
+  mainWindow.webContents.session.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] }, (details, callback) => {
+    if (!manualOfflineSimulation) {
+      callback({ cancel: false });
+      return;
+    }
+    callback({ cancel: shouldBlockRequestInManualOffline(details.url, adminOrigin) });
   });
 
   mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
@@ -1521,14 +1744,12 @@ function createMainWindow(initialUrl = getStartupUrl()) {
     mainWindow = null;
   });
 
-  // Clear HTTP cache on startup so web deploy changes are always picked up
-  mainWindow.webContents.session.clearCache().catch(() => {}).then(() => {
-    if (shouldShowOnboarding) {
-      loadDesktopOnboardingPage();
-    } else {
-      mainWindow.loadURL(lastLoadedUrl);
-    }
-  });
+  // 2026-11-23: Preserve Chromium HTTP cache across restarts so offline launches can load the panel bundle; webDeployMonitor handles live deploy refreshes.
+  if (shouldShowOnboarding) {
+    loadDesktopOnboardingPage();
+  } else {
+    mainWindow.loadURL(lastLoadedUrl);
+  }
 }
 
 function configureAutoStart() {
@@ -1594,6 +1815,22 @@ function refreshTrayMenu() {
   const pollerStatusLabel = pollerState?.active
     ? `Notifier: aktif${pollerState.lastError ? ` (${pollerState.lastError})` : ''}`
     : 'Notifier: oturum bekliyor';
+  const prefetchState = offlinePrefetcher?.getState();
+  const offlineMeta = prefetchState?.meta || offlineApiCache?.getMeta();
+  const outboxSummary = offlineOutboxStore?.getSummary() || { pendingCount: 0, conflictCount: 0, totalCount: 0 };
+  let offlineStatusLabel = 'Çevrimdışı Yedek: bekleniyor';
+  if (manualOfflineSimulation) {
+    offlineStatusLabel = 'Çevrimdışı Mod: AKTİF (bağlantı kesik)';
+  } else if (offlineMeta?.savedAt) {
+    const parsedTime = Date.parse(offlineMeta.savedAt);
+    const timeLabel = Number.isFinite(parsedTime)
+      ? new Date(parsedTime).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })
+      : '-';
+    offlineStatusLabel = `Çevrimdışı Yedek: hazir (${timeLabel} · ${offlineMeta.entryCount || 0} kayıt)`;
+  }
+  const outboxStatusLabel = outboxSummary.totalCount > 0
+    ? `Çevrimdışı Kuyruk: ${outboxSummary.pendingCount} bekliyor, ${outboxSummary.conflictCount} çakışma`
+    : 'Çevrimdışı Kuyruk: boş';
 
   tray.setContextMenu(Menu.buildFromTemplate([
     {
@@ -1612,10 +1849,40 @@ function refreshTrayMenu() {
       label: pollerStatusLabel,
       enabled: false
     },
+    {
+      label: offlineStatusLabel,
+      enabled: false
+    },
+    {
+      label: outboxStatusLabel,
+      enabled: false
+    },
     { type: 'separator' },
     {
       label: 'Elvador Aç',
       click: () => openInApp(getStartupUrl())
+    },
+    manualOfflineSimulation
+      ? {
+          label: 'Çevrimdışı Moddan Çık (Canlıya Dön)',
+          click: () => {
+            focusMainWindow();
+            setManualOfflineMode(false, 'tray');
+          }
+        }
+      : {
+          label: 'Çevrimdışı Modu Aç (İnterneti Kes)',
+          click: () => {
+            focusMainWindow();
+            setManualOfflineMode(true, 'tray');
+          }
+        },
+    {
+      label: 'Yedeği Şimdi Güncelle',
+      enabled: Boolean(prefetchState?.active) && !manualOfflineSimulation,
+      click: () => {
+        void offlinePrefetcher?.syncNow({ manual: true });
+      }
     },
     {
       label: "Elvador'u Yeniden Başlat",
@@ -1624,8 +1891,16 @@ function refreshTrayMenu() {
     {
       label: 'QR/Link Sıfırla',
       click: () => {
+        manualOfflineSimulation = false;
+        activeSessionBrand = '';
+        lastAdminSession = null;
         clearAdminAccessUrl();
         pendingPoller?.stop();
+        offlinePrefetcher?.stop();
+        offlineOutboxSync?.stop();
+        offlineApiCache?.clear();
+        offlineOutboxStore?.clear();
+        refreshTrayMenu();
         focusMainWindow();
         loadDesktopOnboardingPage();
       }
@@ -1674,6 +1949,10 @@ function refreshTrayMenu() {
       click: () => {
         isQuitting = true;
         pendingPoller?.stop();
+        offlinePrefetcher?.stop();
+        offlineOutboxSync?.stop();
+        offlineApiCache?.flushSync();
+        offlineOutboxStore?.flushSync();
         notificationService?.clearAll();
         notificationSoundService?.stopNotificationSound('quit');
         app.quit();
@@ -1757,17 +2036,155 @@ function registerIpcHandlers() {
   ipcMain.handle('elvador:sync-admin-session', (_event, session = {}) => {
     const owner = `${session.brand || ''}:${session.adminUserId || session.user?.adminUserId || session.username || ''}`;
     if (owner !== customizationOwner) { notificationService?.setCustomization(null); customizationOwner = owner; }
-    pendingPoller?.start(session);
+    activeSessionBrand = String(session.brand || session.user?.brand || activeSessionBrand || '').trim().toLowerCase();
+    lastAdminSession = session && session.token ? { ...session } : null;
+    if (!manualOfflineSimulation) {
+      pendingPoller?.start(session);
+      offlinePrefetcher?.start(session);
+      offlineOutboxSync?.start(session);
+      if ((offlineOutboxStore?.getSummary()?.pendingCount || 0) > 0) {
+        void offlineOutboxSync?.syncPending();
+      }
+    }
     refreshTrayMenu();
-    return { ok: true, pendingPollerState: pendingPoller?.getState() || null };
+    return {
+      ok: true,
+      pendingPollerState: pendingPoller?.getState() || null,
+      offlinePrefetchState: offlinePrefetcher?.getState() || null,
+      outboxSummary: offlineOutboxStore?.getSummary() || null
+    };
   });
 
   ipcMain.handle('elvador:clear-admin-session', () => {
     notificationService?.setCustomization(null);
     customizationOwner = '';
+    activeSessionBrand = '';
+    lastAdminSession = null;
     pendingPoller?.stop();
+    offlinePrefetcher?.stop();
+    offlineOutboxSync?.stop();
     refreshTrayMenu();
     return { ok: true };
+  });
+
+  ipcMain.handle('elvador:offline:get-state', (event) => {
+    if (!isAdminPanelSender(event)) {
+      return { offline: false, simulatedOffline: false, meta: null, outboxSummary: null };
+    }
+    return getOfflineStateSnapshot();
+  });
+
+  ipcMain.handle('elvador:offline:cache-put', (event, payload = {}) => {
+    if (!isAdminPanelSender(event) || !offlineApiCache || manualOfflineSimulation) {
+      return { ok: false };
+    }
+    if (!payload || typeof payload.url !== 'string' || typeof payload.body !== 'string') {
+      return { ok: false, reason: 'invalid_payload' };
+    }
+    return offlineApiCache.set(payload.url, {
+      status: payload.status,
+      contentType: payload.contentType,
+      body: payload.body,
+      brand: activeSessionBrand || undefined
+    });
+  });
+
+  ipcMain.handle('elvador:offline:cache-get', (event, url = '') => {
+    if (!isAdminPanelSender(event) || !offlineApiCache || typeof url !== 'string') {
+      return { hit: false };
+    }
+    return offlineApiCache.get(url);
+  });
+
+  ipcMain.handle('elvador:offline:check-online', async (event) => {
+    if (!isAdminPanelSender(event)) {
+      return { online: false };
+    }
+    if (manualOfflineSimulation) {
+      return { online: false, simulatedOffline: true };
+    }
+    return checkOnlineReachability(config.adminUrl, 4000);
+  });
+
+  ipcMain.handle('elvador:offline:exit-manual', (event) => {
+    if (!isAdminPanelSender(event)) {
+      return { ok: false };
+    }
+    return { ok: setManualOfflineMode(false, 'banner_button') };
+  });
+
+  ipcMain.handle('elvador:offline:queue-write', (event, payload = {}) => {
+    if (!isAdminPanelSender(event) || !offlineApiCache || !offlineOutboxStore) {
+      return {
+        allowed: false,
+        status: 503,
+        body: { success: false, offline: true, error: 'Bu işlem çevrimdışı modda yapılamaz.' }
+      };
+    }
+    const result = applyOfflineWrite({
+      method: payload.method,
+      url: payload.url,
+      body: payload.body,
+      brand: activeSessionBrand || undefined,
+      cache: offlineApiCache,
+      outbox: offlineOutboxStore
+    });
+    refreshTrayMenu();
+    broadcastOfflineState();
+    return result;
+  });
+
+  ipcMain.handle('elvador:offline:outbox-list', (event) => {
+    if (!isAdminPanelSender(event) || !offlineOutboxStore) {
+      return { items: [], summary: { pendingCount: 0, conflictCount: 0, totalCount: 0, syncing: false } };
+    }
+    return {
+      items: offlineOutboxStore.list(),
+      summary: offlineOutboxStore.getSummary()
+    };
+  });
+
+  ipcMain.handle('elvador:offline:outbox-retry', async (event, itemId = null) => {
+    if (!isAdminPanelSender(event) || !offlineOutboxSync || manualOfflineSimulation) {
+      return { ok: false, reason: manualOfflineSimulation ? 'simulated_offline' : 'unavailable' };
+    }
+    if (lastAdminSession?.token) {
+      offlineOutboxSync.start(lastAdminSession);
+    }
+    const res = await offlineOutboxSync.syncPending({
+      includeConflicts: true,
+      onlyItemId: typeof itemId === 'string' && itemId ? itemId : null
+    });
+    refreshTrayMenu();
+    broadcastOfflineState();
+    return res;
+  });
+
+  ipcMain.handle('elvador:offline:outbox-discard', (event, itemId = '') => {
+    if (!isAdminPanelSender(event) || !offlineOutboxStore || typeof itemId !== 'string' || !itemId) {
+      return { ok: false };
+    }
+    const currentItems = offlineOutboxStore.list();
+    const targetItem = currentItems.find((entry) => entry.id === itemId) || null;
+    const removed = offlineOutboxStore.removeItem(itemId);
+    if (removed && targetItem?.tempId) {
+      for (const candidate of currentItems) {
+        if (candidate.id === itemId) continue;
+        const bodyText = candidate.body ? JSON.stringify(candidate.body) : '';
+        if (
+          (typeof candidate.url === 'string' && candidate.url.includes(targetItem.tempId))
+          || bodyText.includes(targetItem.tempId)
+        ) {
+          offlineOutboxStore.removeItem(candidate.id);
+        }
+      }
+    }
+    if (removed && offlineApiCache) {
+      replayOutboxOnCache({ outbox: offlineOutboxStore, cache: offlineApiCache });
+    }
+    refreshTrayMenu();
+    broadcastOfflineState();
+    return { ok: removed, reverted: Boolean(removed), summary: offlineOutboxStore.getSummary() };
   });
 
   ipcMain.handle('elvador:notification-read-state-applied', (_event, details = {}) => {
@@ -1966,6 +2383,43 @@ if (!gotSingleInstanceLock) {
       writeLog: writeDesktopLog,
       onStateChange: () => refreshTrayMenu()
     });
+    offlineApiCache = createOfflineApiCache({
+      userDataDir: app.getPath('userData'),
+      safeStorage,
+      writeLog: writeDesktopLog
+    });
+    offlineApiCache.loadFromDisk();
+    offlineOutboxStore = createOfflineOutboxStore({
+      userDataDir: app.getPath('userData'),
+      safeStorage,
+      writeLog: writeDesktopLog
+    });
+    offlineOutboxStore.loadFromDisk();
+    offlinePrefetcher = createOfflinePrefetcher({
+      apiBaseUrl: config.apiBaseUrl,
+      cache: offlineApiCache,
+      writeLog: writeDesktopLog,
+      onStateChange: () => {
+        refreshTrayMenu();
+        broadcastOfflineState();
+      }
+    });
+    offlineOutboxSync = createOfflineOutboxSync({
+      apiBaseUrl: config.apiBaseUrl,
+      outbox: offlineOutboxStore,
+      writeLog: writeDesktopLog,
+      onStateChange: () => {
+        refreshTrayMenu();
+        broadcastOfflineState();
+      },
+      onSyncComplete: async () => {
+        if (!manualOfflineSimulation && offlinePrefetcher) {
+          await offlinePrefetcher.syncNow({ manual: true });
+        }
+        refreshTrayMenu();
+        broadcastOfflineState();
+      }
+    });
     webDeployMonitor = createWebDeployMonitor({
       adminUrl: config.adminUrl,
       intervalMs: config.webDeployCheckIntervalMs,
@@ -2079,6 +2533,10 @@ if (!gotSingleInstanceLock) {
       quitAt: new Date().toISOString()
     });
     pendingPoller?.stop();
+    offlinePrefetcher?.stop();
+    offlineOutboxSync?.stop();
+    offlineApiCache?.flushSync();
+    offlineOutboxStore?.flushSync();
     webDeployMonitor?.stop();
     notificationSoundService?.stopNotificationSound('before_quit');
     globalShortcut.unregisterAll();

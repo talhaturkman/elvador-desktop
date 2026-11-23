@@ -1,4 +1,5 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webFrame } = require('electron');
+const { getOfflinePageBridgeScript } = require('./offlinePageBridge');
 
 const PANEL_VISUAL_NOTIFICATION_SELECTOR = '.admin-visual-alert-ribbon';
 const PANEL_VISUAL_NOTIFICATION_REMINDER_MS = 300000;
@@ -671,6 +672,29 @@ function reportWebDeployReloadFromSession() {
   }
 }
 
+const offlineStateListeners = new Set();
+
+ipcRenderer.on('elvador:offline-state-changed', (_event, payload = {}) => {
+  const detail = payload && typeof payload === 'object' ? payload : {};
+  offlineStateListeners.forEach((listener) => {
+    try {
+      listener(detail);
+    } catch (_) {
+      // Ignore listener errors in renderer.
+    }
+  });
+});
+
+function onOfflineStateChanged(listener) {
+  if (typeof listener !== 'function') {
+    return () => {};
+  }
+  offlineStateListeners.add(listener);
+  return () => {
+    offlineStateListeners.delete(listener);
+  };
+}
+
 contextBridge.exposeInMainWorld('elvadorDesktop', {
   isDesktopShell: true,
   customizationVersion: 3,
@@ -682,6 +706,16 @@ contextBridge.exposeInMainWorld('elvadorDesktop', {
   syncAdminSession: (session) => ipcRenderer.invoke('elvador:sync-admin-session', session),
   clearAdminSession: () => ipcRenderer.invoke('elvador:clear-admin-session'),
   saveAdminAccessLink: (value) => ipcRenderer.invoke('elvador:save-admin-access-link', value),
+  getOfflineState: () => ipcRenderer.invoke('elvador:offline:get-state'),
+  onOfflineStateChanged,
+  cacheApiResponse: (payload) => ipcRenderer.invoke('elvador:offline:cache-put', payload),
+  getCachedApiResponse: (url) => ipcRenderer.invoke('elvador:offline:cache-get', url),
+  checkOnline: () => ipcRenderer.invoke('elvador:offline:check-online'),
+  exitManualOfflineMode: () => ipcRenderer.invoke('elvador:offline:exit-manual'),
+  queueOfflineWrite: (payload) => ipcRenderer.invoke('elvador:offline:queue-write', payload),
+  getOfflineOutbox: () => ipcRenderer.invoke('elvador:offline:outbox-list'),
+  retryOfflineOutbox: (itemId) => ipcRenderer.invoke('elvador:offline:outbox-retry', itemId),
+  discardOfflineOutboxItem: (itemId) => ipcRenderer.invoke('elvador:offline:outbox-discard', itemId),
   showNativeNotification: showNativeNotificationFromPage,
   playNotificationSound: playNotificationSoundFromPage,
   stopNotificationSound: stopNotificationSoundFromPage,
@@ -690,6 +724,14 @@ contextBridge.exposeInMainWorld('elvadorDesktop', {
   onNotificationMinimized,
   reportNotificationReadState
 });
+
+if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {
+  try {
+    void webFrame.executeJavaScript(getOfflinePageBridgeScript()).catch(() => {});
+  } catch (_) {
+    // Ignore main-world injection failure on opaque frames.
+  }
+}
 
 window.addEventListener('DOMContentLoaded', () => {
   reportWebDeployReloadFromSession();
